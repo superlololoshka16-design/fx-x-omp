@@ -46,6 +46,7 @@ const tool_result_errors = @import("../tooling/tool_result_errors.zig");
 const session_display_metadata = @import("../session/session_display_metadata.zig");
 const session_title_generation = @import("../session/session_title_generation.zig");
 const session_log = @import("../session/session_log.zig");
+const session_tree = @import("../session/session_tree.zig");
 const session_store = @import("../session/session_store.zig");
 const session_catalog_cache = @import("../session/session_catalog_cache.zig");
 const session_summary_codec = @import("../session/session_summary_codec.zig");
@@ -1908,6 +1909,131 @@ pub fn Runtime(comptime App: type) type {
                 app.auth.accountId(),
                 credential,
             );
+        }
+
+        fn countTreeTurns(history: []const types.HistoryTurn) usize {
+            var count: usize = 0;
+            for (history) |turn| {
+                if (turn != .compacted_summary) count += 1;
+            }
+            return count;
+        }
+
+        fn treeSliceEnd(history: []const types.HistoryTurn, n: usize) ?usize {
+            var seen: usize = 0;
+            for (history, 0..) |turn, i| {
+                if (turn == .compacted_summary) continue;
+                seen += 1;
+                if (seen == n) return i + 1;
+            }
+            return null;
+        }
+
+        fn syncTreeSnapshot(app: *App) !void {
+            if (app.tree_snapshot) |snap| {
+                if (app.tree_state.leaf) |leaf| {
+                    const live = try app.session.snapshotHistory(app.alloc);
+                    defer types.freeHistoryTurnSlice(app.alloc, live);
+                    if (countTreeTurns(live) > leaf) {
+                        types.freeHistoryTurnSlice(app.alloc, snap);
+                        app.tree_snapshot = null;
+                        app.tree_state.leaf = null;
+                    }
+                }
+            }
+            if (app.tree_snapshot == null) {
+                app.tree_snapshot = try app.session.snapshotHistory(app.alloc);
+            }
+        }
+
+        fn clearTreeSnapshot(app: *App) void {
+            if (app.tree_snapshot) |snap| {
+                types.freeHistoryTurnSlice(app.alloc, snap);
+            }
+            app.tree_snapshot = null;
+            app.tree_state.leaf = null;
+        }
+
+        pub fn treeList(app: *App) !void {
+            try syncTreeSnapshot(app);
+            const snapshot = app.tree_snapshot orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+                return;
+            };
+            const nodes = session_tree.scanTurns(app.alloc, snapshot) catch {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+                return;
+            };
+            defer session_tree.freeTurnNodes(app.alloc, nodes);
+            if (nodes.len == 0) {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No turns recorded yet." }, true);
+                return;
+            }
+            var out: std.Io.Writer.Allocating = .init(app.alloc);
+            defer out.deinit();
+            for (nodes) |node| {
+                const marker: []const u8 = if (app.tree_state.leaf) |leaf|
+                    (if (node.index == leaf) " <<" else "   ")
+                else
+                    (if (node.index == nodes.len) " <<" else "   ");
+                out.writer.print("turn {d: >3}{s} {s}\n", .{ node.index, marker, node.preview }) catch {
+                    try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Out of memory rendering tree." }, true);
+                    return;
+                };
+            }
+            out.writer.print("{d} turn(s). Rewind: /tree <n> (moves back or forward; abandoned turns stay in the session log).", .{nodes.len}) catch {};
+            const body = try app.alloc.dupe(u8, out.written());
+            defer app.alloc.free(body);
+            try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = body }, true);
+        }
+
+        pub fn rewindToTurn(app: *App, n: usize) !void {
+            if (comptime !@hasDecl(App, "beginResumeProjection")) {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Rewind is unavailable in this runtime." }, true);
+                return;
+            }
+            if (app.worker.isProcessing()) {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Cannot rewind while the agent is working." }, true);
+                return;
+            }
+            try syncTreeSnapshot(app);
+            const snapshot = app.tree_snapshot orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+                return;
+            };
+            if (n == 0) {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Turn numbers start at 1." }, true);
+                return;
+            }
+            const end = treeSliceEnd(snapshot, n) orelse {
+                const total = countTreeTurns(snapshot);
+                const msg = try std.fmt.allocPrint(app.alloc, "Turn {d} is out of range (1..{d}).", .{ n, total });
+                defer app.alloc.free(msg);
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = msg }, true);
+                return;
+            };
+            const window = snapshot[0..end];
+            const lang = app.session.languageSnapshot();
+            try app.session.restore(app.alloc, lang, window);
+            app.tree_state.leaf = n;
+
+            var projection = try app.beginResumeProjection();
+            defer projection.deinit();
+            var labels = HistoricalSessionLabels{ .workspace_root = app.workspace_root };
+            defer labels.deinit(app.alloc);
+            var sink = DetachedHistorySink(@TypeOf(projection)){
+                .app = app,
+                .projection = &projection,
+                .labels = &labels,
+            };
+            try replayHistoryToSink(app, &sink, window, &labels);
+            try projection.finalize();
+            try app.installResumeProjection(&projection);
+
+            const total = countTreeTurns(snapshot);
+            const msg = try std.fmt.allocPrint(app.alloc, "Rewound to turn {d} of {d}. New turns branch from here; abandoned turns remain in the session log. /tree <n> moves again.", .{ n, total });
+            defer app.alloc.free(msg);
+            try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = msg }, true);
         }
 
         pub fn resumeSelectedSession(app: *App) !bool {
@@ -5028,6 +5154,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn closeWritableSession(app: *App) void {
+            if (comptime @hasField(App, "tree_snapshot")) clearTreeSnapshot(app);
             app.session_persistence.resume_handoff_intent = .none;
             _ = closeWritableSessionWithResumeHandoff(app);
         }
