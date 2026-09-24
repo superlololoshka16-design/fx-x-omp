@@ -16,6 +16,13 @@ const render_request = @import("../../ui/render_request.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const input_limit_feedback = @import("input_limit_feedback.zig");
 
+fn tryAttachClipboardImage(comptime App: type, app: *App) !void {
+    if (comptime !@hasDecl(App, "peekNextImageId")) return;
+    if (comptime !@hasField(App, "pending_images")) return;
+    const image_commands = @import("../images/image_commands.zig");
+    image_commands.Commands(App).attachClipboardSilent(app) catch {};
+}
+
 fn normalizeApprovalAmendmentPasteInPlace(bytes: []u8) []u8 {
     const normalized = text_utils.normalizeLineEndingsInPlace(bytes);
     for (normalized) |*byte| {
@@ -298,7 +305,10 @@ pub fn PasteEditRuntime(comptime App: type) type {
         }
 
         pub fn finalizePastedBlock(app: *App, max_input_len: usize) !void {
-            if (app.input_runtime.paste.buffer.items.len == 0) return;
+            if (app.input_runtime.paste.buffer.items.len == 0) {
+                try tryAttachClipboardImage(App, app);
+                return;
+            }
 
             // Inline image paths create pending attachments, not pasted-text blocks.
             if (image_attachments.hasImagePathToken(app.input_runtime.paste.buffer.items)) {

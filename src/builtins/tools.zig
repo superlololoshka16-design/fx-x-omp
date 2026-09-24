@@ -838,7 +838,7 @@ pub const todo = ToolSpec{
         .input_schema = .{
             .properties = &.{
                 .{ .name = "op", .json_type = .string, .description = "Operation: add, start, done, drop, rm, or view." },
-                .{ .name = "task", .json_type = .string, .description = "Exact task text for targeted ops. Optional for add (with items)." },
+                .{ .name = "task", .json_type = .string, .description = "Exact task text for start/done/drop/rm; task=\"all\" targets every task. Optional for add (with items). Omitting task on done/drop/rm is an error, never a silent bulk action." },
                 .{ .name = "items", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .string } }, .description = "Array of new task strings for add. Optional." },
                 .{ .name = "reason", .json_type = .string, .description = "Optional reason note." },
             },

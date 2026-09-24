@@ -1094,6 +1094,11 @@ pub fn SubmitRuntime(comptime App: type) type {
             prompt: []const u8,
             skill_tokens: []const registered_entities.SkillTokenSpan,
         ) !PromptAdmission {
+            // Arm the loop with this prompt regardless of delivery path: the
+            // pending-install branch returns before the enqueue arm below.
+            if (comptime @hasField(App, "loop_state")) {
+                if (prompt.len > 0) app.loop_state.armWithPrompt(app.alloc, prompt) catch {};
+            }
             switch (try installPendingSubmission(app, prompt, skill_tokens)) {
                 .installed => return .pending,
                 .unavailable => {},
@@ -1104,9 +1109,6 @@ pub fn SubmitRuntime(comptime App: type) type {
             else
                 try App.enqueuePrompt(app, prompt);
             if (!accepted) return .rejected;
-            if (comptime @hasField(App, "loop_state")) {
-                if (prompt.len > 0) app.loop_state.armWithPrompt(app.alloc, prompt) catch {};
-            }
             return .enqueued;
         }
 

@@ -84,9 +84,22 @@ pub fn Commands(comptime App: type) type {
         }
 
         pub fn attachClipboard(app: *App) !void {
+            try attachClipboardInner(app, true);
+        }
+
+        /// Ctrl+V path: an empty bracketed paste triggers a host-clipboard image
+        /// probe. A clipboard without an image is the common case there, so it
+        /// stays silent; only real failures are reported.
+        pub fn attachClipboardSilent(app: *App) !void {
+            try attachClipboardInner(app, false);
+        }
+
+        fn attachClipboardInner(app: *App, notice_empty: bool) !void {
             var loaded = image_attachments.loadClipboardImageAttachment(app.alloc) catch |err| {
                 if (err == error.NoClipboardImage) {
-                    try app.writeDomainNotice(.{ .topic = "images", .tone = .neutral, .body = "no image found on clipboard" }, true);
+                    if (notice_empty) {
+                        try app.writeDomainNotice(.{ .topic = "images", .tone = .neutral, .body = "no image found on clipboard" }, true);
+                    }
                 } else if (err != error.Unsupported) {
                     const line = try std.fmt.allocPrint(app.alloc, "failed to paste clipboard image: {s}", .{@errorName(err)});
                     defer app.alloc.free(line);

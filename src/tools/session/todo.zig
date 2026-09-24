@@ -43,7 +43,7 @@ pub fn decode(ctx: tool_dispatch.DispatchContext, args_json: []const u8) tool_di
 
     const op = if (args.get("op")) |v| (if (v == .string) v.string else "") else "";
     if (op.len == 0) {
-        return .{ .failure = try ctx.allocator.dupe(u8, "todo requires op: add|done|drop|rm|view") };
+        return .{ .failure = try ctx.allocator.dupe(u8, "todo requires op: add|start|done|drop|rm|view") };
     }
 
     const input = try ctx.allocator.create(Input);
@@ -258,36 +258,42 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     } else if (std.mem.eql(u8, input.op, "done") or std.mem.eql(u8, input.op, "drop")) {
         const target_status: TaskStatus = if (std.mem.eql(u8, input.op, "done")) .completed else .abandoned;
         if (input.task) |t| {
-            if (state.findByContent(t)) |found| {
+            if (std.mem.eql(u8, t, "all")) {
+                for (state.tasks.items) |*task| task.status = target_status;
+            } else if (state.findByContent(t)) |found| {
                 found.status = target_status;
             } else {
                 err_msg = "task not found";
             }
         } else {
-            for (state.tasks.items) |*t| t.status = target_status;
+            err_msg = "todo done/drop requires task (use task=all to target every task)";
         }
     } else if (std.mem.eql(u8, input.op, "rm")) {
         if (input.task) |t| {
-            var found_index: ?usize = null;
-            for (state.tasks.items, 0..) |*task, i| {
-                if (std.mem.eql(u8, task.text, t)) {
-                    found_index = i;
-                    break;
+            if (std.mem.eql(u8, t, "all")) {
+                for (state.tasks.items) |task| {
+                    alloc.free(task.text);
+                    if (task.reason) |r| alloc.free(r);
+                }
+                state.tasks.clearRetainingCapacity();
+            } else {
+                var found_index: ?usize = null;
+                for (state.tasks.items, 0..) |*task, i| {
+                    if (std.mem.eql(u8, task.text, t)) {
+                        found_index = i;
+                        break;
+                    }
+                }
+                if (found_index) |i| {
+                    const removed = state.tasks.orderedRemove(i);
+                    alloc.free(removed.text);
+                    if (removed.reason) |r| alloc.free(r);
+                } else {
+                    err_msg = "task not found";
                 }
             }
-            if (found_index) |i| {
-                const removed = state.tasks.orderedRemove(i);
-                alloc.free(removed.text);
-                if (removed.reason) |r| alloc.free(r);
-            } else {
-                err_msg = "task not found";
-            }
         } else {
-            for (state.tasks.items) |t| {
-                alloc.free(t.text);
-                if (t.reason) |r| alloc.free(r);
-            }
-            state.tasks.clearRetainingCapacity();
+            err_msg = "todo rm requires task (use task=\"all\" to clear the whole list)";
         }
     } else if (std.mem.eql(u8, input.op, "view")) {
         // read-only

@@ -57,6 +57,7 @@ pub const SlashKind = enum {
     tree,
     loop,
     todo,
+    hub,
     mcp,
     skills,
     copy,

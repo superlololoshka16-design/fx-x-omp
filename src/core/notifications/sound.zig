@@ -216,22 +216,46 @@ pub const Player = struct {
             .@"error" => 330,
             else => 440,
         };
-        var cmd_buf: [96]u8 = undefined;
-        const cmd = std.fmt.bufPrint(
-            &cmd_buf,
-            "[Console]::Beep({d},500)",
-            .{freq},
-        ) catch return false;
-        const argv = [_][]const u8{ ps, "-NoProfile", "-Command", cmd };
+        // argv strings are static-lived: cmd is formatted into a function-local
+        // buffer, so build the argument list on the heap for the detached child.
         const alloc = std.heap.c_allocator;
-        const result = std.process.run(alloc, io_mod.getIo(), .{
-            .argv = &argv,
-            .stdout_limit = .limited(64),
-            .stderr_limit = .limited(256),
-        }) catch return false;
-        defer alloc.free(result.stdout);
-        defer alloc.free(result.stderr);
-        return result.term == .exited and result.term.exited == 0;
+        const cmd = std.fmt.allocPrint(alloc, "[Console]::Beep({d},500)", .{freq}) catch return false;
+        const argv = alloc.alloc([]const u8, 4) catch {
+            alloc.free(cmd);
+            return false;
+        };
+        argv[0] = ps;
+        argv[1] = "-NoProfile";
+        argv[2] = "-Command";
+        argv[3] = cmd;
+        // fire and forget: spawn detached, never block the UI thread on the
+        // ~0.7s powershell startup; a failed spawn simply skips the beep.
+        var child = std.process.spawn(io_mod.getIo(), .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch {
+            alloc.free(argv);
+            alloc.free(cmd);
+            return false;
+        };
+        const thread = std.Thread.spawn(.{}, reapBeepChild, .{ child, argv, cmd }) catch {
+            // no thread: kill it now rather than orphan
+            _ = child.wait(io_mod.getIo()) catch {};
+            alloc.free(argv);
+            alloc.free(cmd);
+            return true;
+        };
+        thread.detach();
+        return true;
+    }
+
+    fn reapBeepChild(child: std.process.Child, argv: []const u8, cmd: []u8) void {
+        _ = child.wait(io_mod.getIo()) catch {};
+        const alloc = std.heap.c_allocator;
+        alloc.free(argv);
+        alloc.free(cmd);
     }
 
     fn findWindowsPowershell() ?[]const u8 {
