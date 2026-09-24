@@ -88,7 +88,15 @@ pub fn InterruptRuntime(comptime App: type) type {
                 app.shell.render_requests.request(.footer);
                 return;
             }
-            if (!app.stream.active) return;
+            if (!app.stream.active) {
+                // No active turn: ESC stops background executions instead
+                // (omp parity: cancel kills background jobs).
+                if (comptime @hasDecl(App, "stopBackgroundExecutions")) {
+                    _ = app.stopBackgroundExecutions();
+                    app.shell.render_requests.request(.footer);
+                }
+                return;
+            }
             // Pending approval keeps the stream active until resolution.
             // Avoid duplicate cancellation notices once the worker is cancelled.
             if (app.worker.isCancelRequested()) return;

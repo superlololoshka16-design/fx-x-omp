@@ -319,14 +319,17 @@ var chime_path_mutex: std.Io.Mutex = .init;
 fn ensureLinuxChimePath(cue: Cue) ?[]const u8 {
     const idx = @intFromEnum(cue);
     chime_path_mutex.lockUncancelable(io_mod.getIo());
-    defer chime_path_mutex.unlockUncancelable(io_mod.getIo());
+    defer chime_path_mutex.unlock(io_mod.getIo());
     if (chime_path_bufs[idx]) |path| return path;
 
     const alloc = std.heap.c_allocator;
     const home = io_mod.getenv("HOME") orelse return null;
     const dir = std.fs.path.join(alloc, &.{ home, ".fx", "sounds" }) catch return null;
+    defer alloc.free(dir);
     io_mod.makeDirRecursive(dir) catch return null;
-    const path = std.fs.path.join(alloc, &.{ dir, "fx-" ++ @tagName(cue) ++ ".wav" }) catch return null;
+    const file_name = std.fmt.allocPrint(alloc, "fx-{s}.wav", .{@tagName(cue)}) catch return null;
+    defer alloc.free(file_name);
+    const path = std.fs.path.join(alloc, &.{ dir, file_name }) catch return null;
 
     const wav = buildChimeWav(alloc, cue) catch return null;
     defer alloc.free(wav);

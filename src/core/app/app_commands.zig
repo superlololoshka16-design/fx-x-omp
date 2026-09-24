@@ -1263,7 +1263,7 @@ pub fn Handlers(comptime App: type) type {
 
         fn commandShowTree(ctx: *anyopaque, rest: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            if (comptime @hasField(App, "tree_snapshot")) {
+            if (comptime @hasField(App, "session_persistence")) {
                 const arg = std.mem.trim(u8, rest, " \t");
                 if (arg.len == 0) {
                     try app_session_runtime.Runtime(App).treeList(app);

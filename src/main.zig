@@ -54,6 +54,7 @@ const builtin_commands = @import("builtins/commands.zig");
 const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
 const agent_extras = @import("core/agent/agent_extras.zig");
+const background_jobs = @import("core/execution/background_jobs.zig");
 const reasoning_preview = @import("core/output/reasoning_preview.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const builtin_providers = @import("builtins/providers.zig");
@@ -480,6 +481,45 @@ const App = struct {
         }
     }
 
+    /// ESC with no active agent turn stops every live background execution
+    /// (omp parity: cancel kills background jobs, not just the current turn).
+    pub fn stopBackgroundExecutions(self: *App) bool {
+        const alloc = std.heap.c_allocator;
+        const items = self.managed_executions.list(alloc) catch return false;
+        defer {
+            for (items) |*item| @constCast(item).deinit(alloc);
+            alloc.free(items);
+        }
+        var stopped: usize = 0;
+        for (items) |item| {
+            if (std.meta.activeTag(item.state) != .running) continue;
+            if (item.backend != .captured) continue;
+            var prepared = self.managed_executions.stop(alloc, item.execution_id, false) catch continue;
+            self.managed_executions.cancelDelivery(prepared.snapshot.execution_id, prepared.reservation_id) catch {};
+            prepared.deinit(alloc);
+            stopped += 1;
+        }
+        self.background_watcher.clear(alloc);
+        if (stopped == 0) return false;
+        const msg = std.fmt.allocPrint(alloc, "Stopped {d} background execution(s).", .{stopped}) catch {
+            return true;
+        };
+        defer alloc.free(msg);
+        self.writeDomainNotice(.{ .topic = "shell", .tone = .neutral, .body = msg }, true) catch {};
+        return true;
+    }
+
+    /// Main-thread auto-wake: when a watched background execution completes
+    /// while the agent is idle, wake the agent once with a system notice so it
+    /// observes the finished output (omp async job delivery parity).
+    pub fn tickBackgroundJobs(self: *App) !void {
+        if (self.stream.active or self.worker.isProcessing() or self.worker.queuedPromptCount() > 0) return;
+        if (!self.background_watcher.observe(std.heap.c_allocator, &self.managed_executions)) return;
+        const notice = "A background command finished. Observe its result with shell.interact (same session_id, no chars) and continue the task; or stop it with shell.stop if it is no longer needed.";
+        _ = self.enqueuePrompt(notice) catch false;
+        self.shell.render_requests.request(.footer);
+    }
+
     pub fn armLoopFire(self: *App) void {
         if (!self.loop_state.active or self.loop_state.prompt == null) return;
         self.loop_state.pending_fire = true;
@@ -629,6 +669,7 @@ const App = struct {
     upgrader: auto_upgrade.AutoUpgrade = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
     loop_state: agent_extras.LoopState = .{},
+    background_watcher: background_jobs.Watcher = .{},
     reasoning_preview: reasoning_preview.ReasoningPreview = .{},
     mcp: app_mcp_runtime.State = .{},
     skills: skill_runtime.Runtime = .{},
@@ -984,6 +1025,7 @@ const App = struct {
         shutdown_trace.mark("stop_stream");
 
         self.loop_state.deinit(self.alloc);
+        self.background_watcher.deinit(self.alloc);
         self.worker.requestShutdown();
         SessionAppRuntime.requestPersistenceShutdown(self);
         self.managed_executions.shutdown();
@@ -3343,6 +3385,7 @@ const App = struct {
     pub fn loopSettleInputDeliveryEpoch(ctx: *anyopaque) !void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (comptime @hasField(App, "loop_state")) self.tickLoop() catch {};
+        if (comptime @hasField(App, "background_watcher")) self.tickBackgroundJobs() catch {};
         if (!InputAppRuntime.terminalPasteActive(self)) return;
         try InputAppRuntime.settleTerminalPasteDeliveryEpochWithLimits(
             self,
