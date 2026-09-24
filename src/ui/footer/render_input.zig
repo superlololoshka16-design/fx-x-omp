@@ -754,15 +754,24 @@ fn turnActivityProjection(
 }
 
 /// Appends the live reasoning tail to the thinking label when the model is in
-/// the thinking phase. Fits the fixed 128-byte footer label buffer: the base
-/// label is bounded (~40) and the preview is capped at 80 by the ring reader.
+/// the thinking phase. `label` may be a prefix slice of `buf` (buildTurnLabel
+/// wrote it there), so never copy buf into itself: ensure the label bytes live
+/// in buf, then append the separator + preview to the DISJOINT tail range.
 fn withReasoningPreview(buf: []u8, label: []const u8, ctx: RenderContext) []const u8 {
     if (ctx.stream.phase != .thinking or ctx.reasoning_preview.len == 0) return label;
-    var out: std.Io.Writer = .fixed(buf);
-    out.writeAll(label) catch return label;
-    out.writeAll(" · ") catch return label;
-    out.writeAll(ctx.reasoning_preview) catch return out.buffered();
-    return out.buffered();
+    const sep = " · ";
+    const preview = ctx.reasoning_preview;
+    const label_len = label.len;
+    if (label_len + sep.len + preview.len > buf.len) return label;
+    const label_start = @intFromPtr(label.ptr);
+    const buf_start = @intFromPtr(buf.ptr);
+    const in_buf = label_len > 0 and
+        label_start >= buf_start and
+        label_start + label_len <= buf_start + buf.len;
+    if (!in_buf) @memcpy(buf[0..label_len], label);
+    @memcpy(buf[label_len..][0..sep.len], sep);
+    @memcpy(buf[label_len + sep.len ..][0..preview.len], preview);
+    return buf[0 .. label_len + sep.len + preview.len];
 }
 
 fn toolSlotLabelWithTokens(buf: []u8, label: []const u8, stream: StreamState) []const u8 {
