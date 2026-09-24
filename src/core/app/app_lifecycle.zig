@@ -652,7 +652,7 @@ fn loadStartupStateFromOwnedWorkspace(
         }
         state.provider_order = owned_order;
     }
-    state.statusline_context = settings.statusline_context orelse false;
+    state.statusline_context = settings.statusline_context orelse true;
     state.statusline_session = settings.statusline_session orelse false;
     state.statusline_workspace = settings.statusline_workspace orelse false;
     state.session_title_generation = settings.session_titles orelse true;

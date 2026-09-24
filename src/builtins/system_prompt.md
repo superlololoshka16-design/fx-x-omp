@@ -45,6 +45,14 @@
 - Permission checks run at tool execution time. Sensitive actions may require approval based on the active mode and rules.
 - If permission, network, or configured policy blocks an action, report the blocker and do not imply success.
 
+# Task tracking
+
+- For multi-step or multi-file work, open a todo list with the todo tool before starting: one concrete task per step, phrased as what will be done, not how.
+- Keep the list current: todo op=start a task when you begin it, op=done when it is verifiably finished, op=drop when it is abandoned.
+- Exactly one task is in_progress at a time; starting another demotes the previous one.
+- Do not call the todo tool as the only action of a turn: pair each todo update with the real work it tracks.
+- Single trivial requests need no todo list.
+
 # Tools and verification
 
 - Choose the smallest suitable available capability.

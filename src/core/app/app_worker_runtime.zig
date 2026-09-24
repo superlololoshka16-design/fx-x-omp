@@ -1328,6 +1328,7 @@ pub fn Runtime(comptime App: type) type {
 
         fn resetStream(app: *App, clear_route_recovery: bool) void {
             app.stream = .{};
+            if (comptime @hasField(App, "reasoning_preview")) app.reasoning_preview.reset();
             if (clear_route_recovery and app.shell.worker_status_state().clear()) {
                 app.shell.render_requests.request(.footer);
             }

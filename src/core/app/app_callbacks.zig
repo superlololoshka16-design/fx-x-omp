@@ -346,6 +346,7 @@ pub fn Bindings(comptime App: type) type {
                 .propagate_grant = agentPropagateGrant,
                 .push_event = agentPushEvent,
                 .push_text = agentPushText,
+                .push_reasoning_delta = if (comptime @hasField(App, "reasoning_preview")) agentPushReasoningDelta else null,
                 .push_tool_lifecycle = agentPushToolLifecycle,
                 .push_diff_block = agentPushDiffBlock,
                 .push_system_notice = agentPushSystemNotice,
@@ -840,6 +841,11 @@ pub fn Bindings(comptime App: type) type {
                     if (ack.through_sequence != 0) host.acknowledgeFeedback(ack.child_id, ack.delivery_id, ack.through_sequence) else host.acknowledgeYielded(ack.child_id, ack.delivery_id);
                 }
             }
+        }
+
+        fn agentPushReasoningDelta(ctx: *anyopaque, delta: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            app.reasoning_preview.push(delta);
         }
 
         fn agentAppendRuntimeContext(ctx: *anyopaque, arena: Allocator, messages: *std.ArrayList(ChatMessage)) !void {

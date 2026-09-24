@@ -1867,7 +1867,103 @@ pub const ClipboardImageAttachment = struct {
     }
 };
 
+/// WSL clipboard image: powershell.exe reads the Windows clipboard (shared with
+/// WSLg-less distros through interop), saves a PNG into the Windows temp dir,
+/// prints the path; wslpath translates it into the drvfs mount for loading.
+fn loadClipboardImageAttachmentWsl(alloc: std.mem.Allocator) !ClipboardImageAttachment {
+    if (io_mod.getenv("WSL_DISTRO_NAME") == null) return error.Unsupported;
+
+    const powershell = findWindowsBinary(alloc, "powershell.exe") orelse return error.Unsupported;
+    defer alloc.free(powershell);
+
+    const script =
+        \\Add-Type -AssemblyName System.Windows.Forms,System.Drawing;
+        \\$img=[System.Windows.Forms.Clipboard]::GetImage();
+        \\if($img){
+        \\  $p=Join-Path $env:TEMP ('fx-clip-'+[guid]::NewGuid().ToString('N')+'.png');
+        \\  $img.Save($p,[System.Drawing.Imaging.ImageFormat]::Png);
+        \\  $img.Dispose();
+        \\  Write-Output $p;
+        \\}
+    ;
+
+    const argv = [_][]const u8{ powershell, "-NoProfile", "-Command", script };
+    const result = std.process.run(alloc, io_mod.getIo(), .{
+        .argv = &argv,
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+    }) catch return error.NoClipboardImage;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    const win_path = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (result.term != .exited or result.term.exited != 0 or win_path.len == 0) {
+        return error.NoClipboardImage;
+    }
+
+    // translate C:\... to /mnt/c/...
+    const wslpath = findWindowsBinary(alloc, "wslpath") orelse return error.Unsupported;
+    defer alloc.free(wslpath);
+    const translate_argv = [_][]const u8{ wslpath, "-u", win_path };
+    const translated = std.process.run(alloc, io_mod.getIo(), .{
+        .argv = &translate_argv,
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(256),
+    }) catch return error.NoClipboardImage;
+    defer alloc.free(translated.stdout);
+    defer alloc.free(translated.stderr);
+    const linux_path = std.mem.trim(u8, translated.stdout, " \t\r\n");
+    if (translated.term != .exited or translated.term.exited != 0 or linux_path.len == 0) {
+        return error.NoClipboardImage;
+    }
+
+    const source_dir = try createTempSnapshotDir(alloc);
+    errdefer {
+        cleanupSnapshotDir(source_dir);
+        alloc.free(source_dir);
+    }
+    const temp_path = try std.fs.path.join(alloc, &.{ source_dir, "clipboard.png" });
+    defer alloc.free(temp_path);
+    io_mod.copyFileAtomic(alloc, linux_path, temp_path) catch {
+        return error.NoClipboardImage;
+    };
+    // best-effort cleanup of the windows-side temp png
+    std.Io.Dir.deleteFileAbsolute(io_mod.getIo(), linux_path) catch {};
+
+    const attachment = try loadImageAttachment(alloc, temp_path);
+    return .{
+        .attachment = attachment,
+        .source_dir = source_dir,
+    };
+}
+
+fn fileExists(path: []const u8) bool {
+    const stat = std.Io.Dir.cwd().statFile(io_mod.getIo(), path, .{}) catch return false;
+    return stat.kind == .file;
+}
+
+/// Locates a windows-side binary: bare name first (interop PATH usually has
+/// System32), then the canonical absolute locations.
+fn findWindowsBinary(alloc: std.mem.Allocator, name: []const u8) ?[]u8 {
+    if (std.mem.eql(u8, name, "wslpath")) {
+        if (fileExists("/usr/bin/wslpath")) return alloc.dupe(u8, "/usr/bin/wslpath") catch null;
+        return null;
+    }
+    if (std.mem.eql(u8, name, "powershell.exe")) {
+        const candidates = [_][]const u8{
+            "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe",
+            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        };
+        for (candidates) |candidate| {
+            if (fileExists(candidate)) return alloc.dupe(u8, candidate) catch null;
+        }
+        return null;
+    }
+    return null;
+}
+
 pub fn loadClipboardImageAttachment(alloc: std.mem.Allocator) !ClipboardImageAttachment {
+    if (builtin.os.tag == .linux) return loadClipboardImageAttachmentWsl(alloc);
     if (builtin.os.tag != .macos) return error.Unsupported;
 
     const source_dir = try createTempSnapshotDir(alloc);

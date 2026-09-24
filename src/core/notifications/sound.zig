@@ -6,9 +6,9 @@ const io_mod = @import("../shared/io.zig");
 
 const macos_player_path = "/usr/bin/afplay";
 
-// Sound defaults on only where a real audio player exists (macOS). Elsewhere
-// the fallback is the terminal bell, so notifications stay opt-in.
-pub const default_enabled: bool = builtin.os.tag == .macos;
+// Sound defaults on for macOS (afplay) and Linux (aplay/paplay with a calm
+// generated chime, terminal bell as the universal fallback).
+pub const default_enabled: bool = builtin.os.tag == .macos or builtin.os.tag == .linux;
 
 // One-shot notifications still construct Player directly. Keep these aliases
 // until that path moves behind its own provider boundary.
@@ -130,10 +130,19 @@ const Dependencies = struct {
     sound_path: SoundPathFn,
 
     fn production() Dependencies {
+        if (comptime builtin.os.tag == .linux) {
+            return .{
+                .ctx = null,
+                .platform = .linux,
+                .spawn = spawnSoundProcess,
+                .start_waiter = startDetachedWaiter,
+                .sound_path = unavailableSoundPath,
+            };
+        }
         if (comptime builtin.os.tag != .macos) {
             return .{
                 .ctx = null,
-                .platform = if (builtin.os.tag == .linux) .linux else .unsupported,
+                .platform = .unsupported,
                 .spawn = unsupportedSpawnSoundProcess,
                 .start_waiter = unsupportedStartWaiter,
                 .sound_path = unavailableSoundPath,
@@ -160,8 +169,37 @@ pub const Player = struct {
     pub fn play(self: *Player, cue: Cue) void {
         switch (self.dependencies.platform) {
             .macos => self.playMacos(cue, true),
-            .linux, .unsupported => self.emitBell(),
+            .linux => self.playLinux(cue),
+            .unsupported => self.emitBell(),
         }
+    }
+
+    /// Calm 0.5s chime on Linux: generate a soft sine WAV once, replay it via
+    /// aplay/paplay when either exists, otherwise fall back to the terminal
+    /// bell. Generation is lazy and cached under ~/.fx/sounds.
+    fn playLinux(self: *Player, cue: Cue) void {
+        const wav = ensureLinuxChimePath(cue) orelse {
+            self.emitBell();
+            return;
+        };
+        const players = [_][]const []const u8{
+            &.{ "aplay", "-q" },
+            &.{ "paplay" },
+        };
+        for (players) |player| {
+            var argv_buf: [3][]const u8 = undefined;
+            @memcpy(argv_buf[0..player.len], player);
+            argv_buf[player.len] = wav;
+            const process = self.dependencies.spawn(
+                self.dependencies.ctx,
+                argv_buf[0 .. player.len + 1],
+            ) catch continue;
+            self.dependencies.start_waiter(self.dependencies.ctx, process) catch {
+                process.reap();
+            };
+            return;
+        }
+        self.emitBell();
     }
 
     // Attention notifications always include a terminal BEL so multiplexers
@@ -213,6 +251,90 @@ pub const Player = struct {
         self.bell.emit(self.bell.ctx);
     }
 };
+
+// ---- calm linux chime: 0.5s soft sine with fade, 22.05kHz 16-bit mono WAV ----
+
+const chime_sample_rate: u32 = 22050;
+const chime_duration_ms: u32 = 500;
+
+fn chimeFrequency(cue: Cue) f32 {
+    // low, calm tones; error sits slightly lower
+    return switch (cue) {
+        .@"error" => 392.0, // G4
+        else => 440.0, // A4
+    };
+}
+
+fn writeLe32(buf: []u8, at: usize, value: u32) void {
+    std.mem.writeInt(u32, buf[at..][0..4], value, .little);
+}
+
+fn writeLe16(buf: []u8, at: usize, value: u16) void {
+    std.mem.writeInt(u16, buf[at..][0..2], value, .little);
+}
+
+fn buildChimeWav(alloc: std.mem.Allocator, cue: Cue) ![]u8 {
+    const num_samples: usize = @intCast(@as(u64, chime_sample_rate) * chime_duration_ms / 1000);
+    const data_bytes: usize = num_samples * 2;
+    const total = 44 + data_bytes;
+    const out = try alloc.alloc(u8, total);
+
+    @memcpy(out[0..4], "RIFF");
+    writeLe32(out, 4, @intCast(total - 8));
+    @memcpy(out[8..12], "WAVE");
+    @memcpy(out[12..16], "fmt ");
+    writeLe32(out, 16, 16); // fmt chunk size
+    writeLe16(out, 20, 1); // PCM
+    writeLe16(out, 22, 1); // mono
+    writeLe32(out, 24, chime_sample_rate);
+    writeLe32(out, 28, chime_sample_rate * 2); // byte rate
+    writeLe16(out, 32, 2); // block align
+    writeLe16(out, 34, 16); // bits per sample
+    @memcpy(out[36..40], "data");
+    writeLe32(out, 40, @intCast(data_bytes));
+
+    const freq = chimeFrequency(cue);
+    const fade_samples: usize = chime_sample_rate / 10; // 100ms fade in/out
+    var i: usize = 0;
+    while (i < num_samples) : (i += 1) {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(chime_sample_rate));
+        const phase = 2.0 * std.math.pi * freq * t;
+        // envelope: fade in, sustain, fade out; soft peak 0.35
+        var env: f32 = 1.0;
+        if (i < fade_samples) {
+            env = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(fade_samples));
+        } else if (i + fade_samples > num_samples) {
+            env = @as(f32, @floatFromInt(num_samples - i)) / @as(f32, @floatFromInt(fade_samples));
+        }
+        const sample = @sin(phase) * env * 0.35 * 32767.0;
+        const clamped: i16 = @intFromFloat(@max(@min(sample, 32767.0), -32768.0));
+        std.mem.writeInt(i16, out[44 + i * 2 ..][0..2], clamped, .little);
+    }
+    return out;
+}
+
+var chime_path_bufs = [_]?[]const u8{null} ** std.enums.values(Cue).len;
+var chime_path_mutex: std.Io.Mutex = .init;
+
+fn ensureLinuxChimePath(cue: Cue) ?[]const u8 {
+    const idx = @intFromEnum(cue);
+    chime_path_mutex.lockUncancelable(io_mod.getIo());
+    defer chime_path_mutex.unlockUncancelable(io_mod.getIo());
+    if (chime_path_bufs[idx]) |path| return path;
+
+    const alloc = std.heap.c_allocator;
+    const home = io_mod.getenv("HOME") orelse return null;
+    const dir = std.fs.path.join(alloc, &.{ home, ".fx", "sounds" }) catch return null;
+    io_mod.makeDirRecursive(dir) catch return null;
+    const path = std.fs.path.join(alloc, &.{ dir, "fx-" ++ @tagName(cue) ++ ".wav" }) catch return null;
+
+    const wav = buildChimeWav(alloc, cue) catch return null;
+    defer alloc.free(wav);
+    io_mod.writeFileAtomic(alloc, path, wav) catch return null;
+
+    chime_path_bufs[idx] = path;
+    return path;
+}
 
 const ChildWaiter = struct {
     child: std.process.Child,

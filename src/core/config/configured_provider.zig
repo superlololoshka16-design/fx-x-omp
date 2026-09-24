@@ -1,8 +1,10 @@
 const std = @import("std");
+const types = @import("../shared/types.zig");
 const Allocator = std.mem.Allocator;
 
 const max_providers = 32;
 const max_models = 256;
+const max_reasoning_efforts = 8;
 pub const max_id_bytes = 64;
 pub const max_model_bytes = 1024;
 const max_url_bytes = 2048;
@@ -44,6 +46,9 @@ pub const ModelMetadata = struct {
     max_output_tokens: ?u32 = null,
     supports_tool_use: ?bool = null,
     supports_vision: ?bool = null,
+    /// Runtime effort levels parsed from `reasoning_efforts` in the settings
+    /// metadata. Stored as comptime-literal-backed views; no allocation.
+    reasoning_efforts: []const types.ReasoningEffort = &.{},
 };
 
 /// Registry owns all slices. Treat definitions as immutable while borrowed by
@@ -96,7 +101,10 @@ pub const Definition = struct {
             .bearer => |env| alloc.free(env),
         }
         if (self.reviewer_model) |id| alloc.free(id);
-        for (self.model_metadata) |metadata| alloc.free(metadata.id);
+        for (self.model_metadata) |metadata| {
+            alloc.free(metadata.id);
+            if (metadata.reasoning_efforts.len > 0) alloc.free(@constCast(metadata.reasoning_efforts));
+        }
         alloc.free(self.model_metadata);
     }
 };
@@ -239,22 +247,61 @@ fn parse_metadata(alloc: Allocator, value: std.json.Value) ParseError![]const Mo
     while (iterator.next()) |entry| {
         try validate_model_id(entry.key_ptr.*);
         const metadata = entry.value_ptr.*;
-        try check_fields(metadata, &.{ "context_window", "max_output_tokens", "supports_tool_use", "supports_vision" });
+        try check_fields(metadata, &.{ "context_window", "max_output_tokens", "supports_tool_use", "supports_vision", "reasoning_efforts" });
         const context = try positive_limit(metadata.object.get("context_window"));
         const output = try positive_limit(metadata.object.get("max_output_tokens"));
         if (context != null and output != null and output.? >= context.?) return error.InvalidModelMetadata;
         const tools = try optional_bool(metadata.object.get("supports_tool_use"));
         const vision = try optional_bool(metadata.object.get("supports_vision"));
+        const efforts = try parse_reasoning_efforts(alloc, metadata.object.get("reasoning_efforts"));
         models[initialized] = .{
             .id = try alloc.dupe(u8, entry.key_ptr.*),
             .context_window = context,
             .max_output_tokens = output,
             .supports_tool_use = tools,
             .supports_vision = vision,
+            .reasoning_efforts = efforts,
         };
         initialized += 1;
     }
     return models;
+}
+
+/// Static catalogue of effort literals we are willing to accept from settings.
+/// Each entry is a comptime literal so the returned ReasoningEffort values own
+/// no heap memory and can outlive the parse arena.
+const effort_literals = [_]types.ReasoningEffort{
+    types.ReasoningEffort.literal("minimal"),
+    types.ReasoningEffort.literal("low"),
+    types.ReasoningEffort.literal("medium"),
+    types.ReasoningEffort.literal("high"),
+    types.ReasoningEffort.literal("xhigh"),
+    types.ReasoningEffort.literal("max"),
+};
+
+fn parse_reasoning_efforts(alloc: Allocator, value: ?std.json.Value) ParseError![]const types.ReasoningEffort {
+    const present = value orelse return &.{};
+    if (present != .array) return error.InvalidModelMetadata;
+    if (present.array.items.len == 0) return &.{};
+    if (present.array.items.len > max_reasoning_efforts) return error.LimitExceeded;
+    const out = try alloc.alloc(types.ReasoningEffort, present.array.items.len);
+    for (present.array.items, 0..) |item, i| {
+        if (item != .string) return error.InvalidModelMetadata;
+        const label = std.mem.trim(u8, item.string, " \t");
+        var matched: ?types.ReasoningEffort = null;
+        for (effort_literals) |literal| {
+            if (std.ascii.eqlIgnoreCase(label, literal.label())) {
+                matched = literal;
+                break;
+            }
+        }
+        if (matched) |m| {
+            out[i] = m;
+        } else {
+            return error.InvalidModelMetadata;
+        }
+    }
+    return out;
 }
 
 fn positive_limit(value: ?std.json.Value) ParseError!?u32 {

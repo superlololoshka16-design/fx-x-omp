@@ -721,6 +721,10 @@ pub fn Runtime(comptime App: type) type {
                 .fast_indicator_active = fast_indicator_active,
                 .effort = visible_effort,
                 .model_supports_effort = model_supports_effort,
+                .reasoning_preview = if (comptime @hasField(App, "reasoning_preview"))
+                    app.reasoning_preview.read()
+                else
+                    "",
                 .ctrl_c_pending = app.input_runtime.gestures.ctrlCExitArmed(),
                 .shimmer_pos = shimmer_pos,
                 .now_ms = now_ms,

@@ -204,6 +204,10 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
 /// The returned entry borrows its strings; fetch_catalog replaces them with owned copies.
 fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry {
     const vision = metadata.supports_vision orelse false;
+    var efforts: std.ArrayList(types.ReasoningEffort) = .empty;
+    if (metadata.reasoning_efforts.len > 0) {
+        efforts = .{ .items = @constCast(metadata.reasoning_efforts), .capacity = metadata.reasoning_efforts.len };
+    }
     return .{
         .id = @constCast(metadata.id),
         .model_type = @constCast("language"),
@@ -212,6 +216,8 @@ fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry
         // vision support implies file input through the same path.
         .has_vision = vision,
         .has_file_input = vision,
+        .has_reasoning = metadata.reasoning_efforts.len > 0,
+        .reasoning_efforts = efforts,
         .context_window = metadata.context_window orelse 0,
         .max_tokens = metadata.max_output_tokens orelse 0,
     };
@@ -233,6 +239,11 @@ fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) 
         errdefer alloc.free(entry.id);
         entry.model_type = try alloc.dupe(u8, entry.model_type);
         errdefer alloc.free(entry.model_type);
+        // metadata_entry borrows the definition slices; the catalog owns its
+        // entries (freeModelCatalogEntry deinits reasoning_efforts), so copy.
+        const borrowed = entry.reasoning_efforts.items;
+        entry.reasoning_efforts = .empty;
+        try entry.reasoning_efforts.appendSlice(alloc, borrowed);
         try entries.append(alloc, entry);
     }
     return .{ .catalog = entries };

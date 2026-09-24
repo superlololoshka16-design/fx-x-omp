@@ -423,6 +423,8 @@ pub const RenderContext = struct {
     fast_indicator_active: bool = false,
     effort: types.ReasoningEffort = .auto,
     model_supports_effort: bool = false,
+    /// Live tail of streamed reasoning text (borrowed from the app ring).
+    reasoning_preview: []const u8 = "",
     ctrl_c_pending: bool = false,
     shimmer_pos: i16 = -render_request.animation_padding,
     now_ms: i64 = 0,
@@ -744,11 +746,23 @@ fn turnActivityProjection(
     var visible_stream = ctx.stream;
     visible_stream.last_activity_kind = null;
     if (activity_status.buildTurnLabel(buf, visible_stream, ctx.now_ms)) |label| {
-        return .{ .turn_thinking = .{ .label = label } };
+        return .{ .turn_thinking = .{ .label = withReasoningPreview(buf, label, ctx) } };
     }
     return .{ .turn_thinking = .{
-        .label = "• Thinking",
+        .label = withReasoningPreview(buf, "• Thinking", ctx),
     } };
+}
+
+/// Appends the live reasoning tail to the thinking label when the model is in
+/// the thinking phase. Fits the fixed 128-byte footer label buffer: the base
+/// label is bounded (~40) and the preview is capped at 80 by the ring reader.
+fn withReasoningPreview(buf: []u8, label: []const u8, ctx: RenderContext) []const u8 {
+    if (ctx.stream.phase != .thinking or ctx.reasoning_preview.len == 0) return label;
+    var out: std.Io.Writer = .fixed(buf);
+    out.writeAll(label) catch return label;
+    out.writeAll(" · ") catch return label;
+    out.writeAll(ctx.reasoning_preview) catch return out.buffered();
+    return out.buffered();
 }
 
 fn toolSlotLabelWithTokens(buf: []u8, label: []const u8, stream: StreamState) []const u8 {
