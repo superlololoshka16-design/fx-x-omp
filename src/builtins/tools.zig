@@ -22,6 +22,10 @@ const glob_files_impl = @import("../tools/filesystem/glob_files.zig");
 const grep_files_impl = @import("../tools/filesystem/grep_files.zig");
 const read_file_impl = @import("../tools/filesystem/read_file.zig");
 const write_file_impl = @import("../tools/filesystem/write_file.zig");
+const todo_impl = @import("../tools/session/todo.zig");
+const local_impl = @import("../tools/session/local.zig");
+const lsp_impl = @import("../tools/capabilities/lsp.zig");
+const hub_impl = @import("../tools/session/hub.zig");
 const read_tool_result_impl = @import("../tools/session/read_tool_result.zig");
 const shell_impl = @import("../tools/shell/shell.zig");
 const install_skill_impl = @import("../tools/skills/install_skill.zig");
@@ -825,6 +829,150 @@ pub const read_tool_result = ToolSpec{
     .irreversible_fn = read_tool_result_impl.isIrreversible,
 };
 
+pub const todo = ToolSpec{
+    .name = "todo",
+    .description = "Track task progress in a per-session todo list. State persists in todo.json for the session.",
+    .model_schema = .{
+        .name = "todo",
+        .description = "Track task progress in a per-session todo list. State persists in todo.json for the session.",
+        .input_schema = .{
+            .properties = &.{
+                .{ .name = "op", .json_type = .string, .description = "Operation: add, start, done, drop, rm, or view." },
+                .{ .name = "task", .json_type = .string, .description = "Exact task text for targeted ops. Optional for add (with items)." },
+                .{ .name = "items", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .string } }, .description = "Array of new task strings for add. Optional." },
+                .{ .name = "reason", .json_type = .string, .description = "Optional reason note." },
+            },
+            .required = &.{"op"},
+            .additional_properties = false,
+        },
+    },
+    .executor_kind = .todo,
+    .activity_kind = .write,
+    .requires_approval = false,
+    .action_label = "Updating todo",
+    .completed_action_label = "Updated todo",
+    .label_arg_kind = .name,
+    .label_arg_default = "todo",
+    .permission_target_kind = .none,
+    .decode = todo_impl.decode,
+    .validate = todo_impl.validate,
+    .call = todo_impl.call,
+    .reads_only_fn = todo_impl.readsOnly,
+    .irreversible_fn = todo_impl.isIrreversible,
+};
+
+pub const local_description =
+    "Share artifacts between agents and sessions through local:// names. " ++
+    "put stores text under a name; get reads it; list shows stored names. " ++
+    "Large payloads belong here instead of inline tool output.";
+
+pub const local = ToolSpec{
+    .name = "local",
+    .description = local_description,
+    .model_schema = .{
+        .name = "local",
+        .description = local_description,
+        .input_schema = .{
+            .properties = &.{
+                .{ .name = "op", .json_type = .string, .description = "Operation: put, get, or list." },
+                .{ .name = "name", .json_type = .string, .description = "Artifact name (single path segment) for put/get. Shared across sessions and subagents under ~/.fx/local." },
+                .{ .name = "content", .json_type = .string, .description = "Text content to store for put. Max 4 MiB." },
+            },
+            .required = &.{"op"},
+            .additional_properties = false,
+        },
+    },
+    .executor_kind = .local,
+    .activity_kind = .read,
+    .requires_approval = false,
+    .action_label = "Accessing local artifact",
+    .completed_action_label = "Accessed local artifact",
+    .label_arg_kind = .name,
+    .label_arg_default = "local",
+    .permission_target_kind = .none,
+    .decode = local_impl.decode,
+    .validate = local_impl.validate,
+    .call = local_impl.call,
+    .reads_only_fn = local_impl.readsOnly,
+    .irreversible_fn = local_impl.isIrreversible,
+};
+
+pub const lsp_description =
+    "Language-server queries: definition, hover, references, rename (edit preview), " ++
+    "symbols for a file, wsymbols for a workspace query. Spawns the mapped server " ++
+    "(rust-analyzer, pyright, typescript-language-server, gopls, zls, clangd, jdtls) per call.";
+
+pub const lsp = ToolSpec{
+    .name = "lsp",
+    .description = lsp_description,
+    .model_schema = .{
+        .name = "lsp",
+        .description = lsp_description,
+        .input_schema = .{
+            .properties = &.{
+                .{ .name = "op", .json_type = .string, .description = "definition, hover, references, rename, symbols, or wsymbols." },
+                .{ .name = "file", .json_type = .string, .description = "Target file path (required except for wsymbols)." },
+                .{ .name = "line", .json_type = .integer, .description = "1-indexed line for position queries." },
+                .{ .name = "character", .json_type = .integer, .description = "0-indexed character offset on the line." },
+                .{ .name = "query", .json_type = .string, .description = "Symbol query for wsymbols." },
+                .{ .name = "new_name", .json_type = .string, .description = "Replacement name for rename (returns a WorkspaceEdit preview; nothing is written)." },
+            },
+            .required = &.{"op"},
+            .additional_properties = false,
+        },
+    },
+    .executor_kind = .lsp,
+    .activity_kind = .read,
+    .requires_approval = false,
+    .action_label = "Querying language server",
+    .completed_action_label = "Queried language server",
+    .label_arg_kind = .path,
+    .label_arg_default = "lsp",
+    .permission_target_kind = .none,
+    .decode = lsp_impl.decode,
+    .validate = lsp_impl.validate,
+    .call = lsp_impl.call,
+    .reads_only_fn = lsp_impl.readsOnly,
+    .irreversible_fn = lsp_impl.isIrreversible,
+};
+
+pub const hub_description =
+    "Message other agents and sessions through ~/.fx/hub mailboxes. " ++
+    "send delivers a message to a named peer mailbox, inbox drains your own mailbox, " ++
+    "list shows known peers. Subagents coordinate through this instead of guessing paths.";
+
+pub const hub = ToolSpec{
+    .name = "hub",
+    .description = hub_description,
+    .model_schema = .{
+        .name = "hub",
+        .description = hub_description,
+        .input_schema = .{
+            .properties = &.{
+                .{ .name = "op", .json_type = .string, .description = "send, inbox, or list." },
+                .{ .name = "to", .json_type = .string, .description = "Recipient peer name for send." },
+                .{ .name = "message", .json_type = .string, .description = "Message body for send. Max 256 KiB." },
+                .{ .name = "from", .json_type = .string, .description = "Optional sender name; defaults to the owning session id or main." },
+            },
+            .required = &.{"op"},
+            .additional_properties = false,
+        },
+    },
+    .executor_kind = .hub,
+    .activity_kind = .write,
+    .requires_approval = false,
+    .action_label = "Exchanging agent message",
+    .completed_action_label = "Exchanged agent message",
+    .label_arg_kind = .name,
+    .label_arg_default = "hub",
+    .permission_target_kind = .none,
+    .decode = hub_impl.decode,
+    .validate = hub_impl.validate,
+    .call = hub_impl.call,
+    .reads_only_fn = hub_impl.readsOnly,
+    .irreversible_fn = hub_impl.isIrreversible,
+};
+
 pub const all = [_]tool_dispatch.Tool{
     glob_files,
     grep_files,
@@ -843,6 +991,10 @@ pub const all = [_]tool_dispatch.Tool{
     ask_user_question,
     vision,
     read_tool_result,
+    todo,
+    local,
+    lsp,
+    hub,
 };
 
 pub const registry = tool_dispatch.Registry{ .tools = all[0..] };
@@ -855,6 +1007,7 @@ pub const advertisement_order = [_][]const u8{
     "write_file",
     "shell",
     "subagent",
+    "todo",
     "capability_search",
     "skill",
     "install_skill",
@@ -863,6 +1016,9 @@ pub const advertisement_order = [_][]const u8{
     "ask_user_question",
     "web_fetch",
     "web_search",
+    "local",
+    "lsp",
+    "hub",
 };
 
 pub const read_only_tool_names = [_][]const u8{
@@ -989,6 +1145,10 @@ test "built-in tools register exact active local order" {
         "ask_user_question",
         "vision",
         "read_tool_result",
+        "todo",
+        "local",
+        "lsp",
+        "hub",
     };
 
     try std.testing.expectEqual(expected_names.len, all.len);

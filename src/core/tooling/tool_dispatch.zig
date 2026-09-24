@@ -425,6 +425,10 @@ pub const ExecutorKind = enum {
     ask_user_question,
     vision,
     host,
+    todo,
+    local,
+    lsp,
+    hub,
 };
 
 pub const ApprovalPolicy = enum {
