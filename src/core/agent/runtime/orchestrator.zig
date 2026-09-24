@@ -1335,6 +1335,18 @@ fn normalized_terminal_request_arguments(
     defer parsed.deinit();
     if (parsed.value != .object or parsed.value.object.count() != 1) return null;
     const request = parsed.value.object.getPtr("request") orelse return null;
+    // Lenient models (qwen and friends) serialize the nested request object as
+    // a JSON string. Unwrap it instead of failing the call.
+    if (request.* == .string) {
+        const unwrapped = std.json.parseFromSliceLeaky(
+            std.json.Value,
+            parsed.arena.allocator(),
+            request.string,
+            .{},
+        ) catch return null;
+        if (unwrapped != .object) return null;
+        request.* = unwrapped;
+    }
     if (request.* != .object) return null;
     _ = try normalize_terminal_model_input(
         parsed.arena.allocator(),
@@ -1367,11 +1379,26 @@ fn normalized_subagent_request_arguments(
     const arena = parsed.arena.allocator();
 
     if (parsed.value.object.getPtr("request")) |request| {
-        if (parsed.value.object.count() != 1 or request.* != .object) return null;
+        if (parsed.value.object.count() != 1) return null;
+        var unwrapped = false;
+        if (request.* == .string) {
+            const decoded = std.json.parseFromSliceLeaky(
+                std.json.Value,
+                arena,
+                request.string,
+                .{},
+            ) catch return null;
+            if (decoded != .object) return null;
+            request.* = decoded;
+            unwrapped = true;
+        }
+        if (request.* != .object) return null;
         const action = request.object.getPtr("action") orelse return null;
         if (action.* != .string) return null;
         const canonical = managed_subagent_action(action.string) orelse return null;
-        if (std.mem.eql(u8, canonical, action.string)) return null;
+        // A stringified request must be re-serialized even when the action is
+        // already canonical, or decode sees the original string again.
+        if (!unwrapped and std.mem.eql(u8, canonical, action.string)) return null;
         action.* = .{ .string = canonical };
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
@@ -1387,7 +1414,6 @@ fn normalized_subagent_request_arguments(
     defer out.deinit();
     std.json.Stringify.value(.{ .request = parsed.value }, .{}, &out.writer) catch
         return error.OutOfMemory;
-    _ = arena;
     return try out.toOwnedSlice();
 }
 
