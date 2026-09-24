@@ -230,30 +230,36 @@ pub const Player = struct {
         argv[3] = cmd;
         // fire and forget: spawn detached, never block the UI thread on the
         // ~0.7s powershell startup; a failed spawn simply skips the beep.
-        var child = std.process.spawn(io_mod.getIo(), .{
+        const child_box = alloc.create(std.process.Child) catch {
+            alloc.free(argv);
+            alloc.free(cmd);
+            return false;
+        };
+        child_box.* = std.process.spawn(io_mod.getIo(), .{
             .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
         }) catch {
+            alloc.destroy(child_box);
             alloc.free(argv);
             alloc.free(cmd);
             return false;
         };
-        const thread = std.Thread.spawn(.{}, reapBeepChild, .{ child, argv, cmd }) catch {
-            // no thread: kill it now rather than orphan
-            _ = child.wait(io_mod.getIo()) catch {};
+        const thread = std.Thread.spawn(.{}, reapBeepChild, .{ child_box, argv, cmd }) catch {
+            alloc.destroy(child_box);
             alloc.free(argv);
             alloc.free(cmd);
-            return true;
+            return false;
         };
         thread.detach();
         return true;
     }
 
-    fn reapBeepChild(child: std.process.Child, argv: []const []const u8, cmd: []u8) void {
-        _ = child.wait(io_mod.getIo()) catch {};
+    fn reapBeepChild(child_box: *std.process.Child, argv: []const []const u8, cmd: []u8) void {
+        _ = child_box.wait(io_mod.getIo()) catch {};
         const alloc = std.heap.c_allocator;
+        alloc.destroy(child_box);
         alloc.free(argv);
         alloc.free(cmd);
     }

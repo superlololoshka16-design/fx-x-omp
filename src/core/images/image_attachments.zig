@@ -1876,11 +1876,16 @@ fn loadClipboardImageAttachmentWsl(alloc: std.mem.Allocator) !ClipboardImageAtta
     const powershell = findWindowsBinary(alloc, "powershell.exe") orelse return error.Unsupported;
     defer alloc.free(powershell);
 
+    // $env:TEMP under WSL interop can resolve to a drive letter that does not
+    // exist in the host session (observed: D:\temp), so stage the PNG under
+    // C:\Users\Public via $env:PUBLIC with a $PSHOME-derived fallback.
     const script =
         \\Add-Type -AssemblyName System.Windows.Forms,System.Drawing;
         \\$img=[System.Windows.Forms.Clipboard]::GetImage();
         \\if($img){
-        \\  $p=Join-Path $env:TEMP ('fx-clip-'+[guid]::NewGuid().ToString('N')+'.png');
+        \\  $dir=$env:PUBLIC;
+        \\  if(-not $dir -or -not (Test-Path -LiteralPath $dir)){ $dir=(Split-Path -Qualifier $PSHOME)+'\Users\Public' }
+        \\  $p=Join-Path $dir ('fx-clip-'+[guid]::NewGuid().ToString('N')+'.png');
         \\  $img.Save($p,[System.Drawing.Imaging.ImageFormat]::Png);
         \\  $img.Dispose();
         \\  Write-Output $p;

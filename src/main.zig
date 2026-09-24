@@ -2556,7 +2556,7 @@ const App = struct {
         defer full.deinit();
         full.writer.writeAll(head) catch return;
         full.writer.writeAll(out.written()) catch return;
-        const body = self.alloc.dupe(u8, std.mem.trimRight(u8, full.written(), "\n")) catch return;
+        const body = self.alloc.dupe(u8, std.mem.trim(u8, full.written(), "\n")) catch return;
         defer self.alloc.free(body);
         self.writeDomainNotice(.{ .topic = "todo", .tone = .neutral, .body = body }, true) catch {};
         self.shell.render_requests.request(.transcript);
