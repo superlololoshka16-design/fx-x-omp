@@ -34,6 +34,8 @@ const skill_runtime = @import("../skills/skill_runtime.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const tool_presentation = @import("../tooling/tool_presentation.zig");
 const session_commands = @import("../session/session_commands.zig");
+const agent_extras = @import("../agent/agent_extras.zig");
+const session_tree = @import("../session/session_tree.zig");
 const usage_recovery = @import("../session/usage_recovery.zig");
 const usage_dashboard_runtime = @import("usage_dashboard_runtime.zig");
 const usage_report = @import("../session/usage_report.zig");
@@ -374,6 +376,9 @@ pub fn Handlers(comptime App: type) type {
                 .show_stats = commandShowStats,
                 .show_usage = commandShowUsage,
                 .undo_last = commandUndoLast,
+                .show_tree = commandShowTree,
+                .handle_loop = commandHandleLoop,
+                .show_todo = commandShowTodo,
                 .handle_mcp = commandHandleMcp,
                 .handle_skills = commandHandleSkills,
                 .copy_last = commandCopyLast,
@@ -1253,6 +1258,155 @@ pub fn Handlers(comptime App: type) type {
                 .topic = "undo",
                 .tone = .neutral,
                 .body = msg,
+            }, true);
+        }
+
+        fn commandShowTree(ctx: *anyopaque, rest: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasField(App, "tree_snapshot")) {
+                const arg = std.mem.trim(u8, rest, " \t");
+                if (arg.len == 0) {
+                    try app_session_runtime.Runtime(App).treeList(app);
+                    return;
+                }
+                const n = std.fmt.parseInt(usize, arg, 10) catch {
+                    try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Usage: /tree or /tree <turn-number>." }, true);
+                    return;
+                };
+                try app_session_runtime.Runtime(App).rewindToTurn(app, n);
+                return;
+            }
+            try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Tree rewind is unavailable in this runtime." }, true);
+        }
+
+        fn commandHandleLoop(ctx: *anyopaque, rest: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasField(App, "loop_state")) {
+                const alloc = app.alloc;
+                const arg = std.mem.trim(u8, rest, " \t");
+                if (arg.len == 0) {
+                    if (app.loop_state.active) {
+                        const ran = app.loop_state.iterations_run;
+                        app.loop_state.clear(alloc);
+                        const msg = try std.fmt.allocPrint(alloc, "loop disabled after {d} iteration(s).", .{ran});
+                        defer alloc.free(msg);
+                        try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = msg }, true);
+                    } else {
+                        try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = "loop is not active. Usage: /loop [count|duration] [--while|--until '<cmd>'] [prompt]" }, true);
+                    }
+                    return;
+                }
+                const parsed = agent_extras.parseLoopArgs(alloc, arg) catch |err| {
+                    const msg = try std.fmt.allocPrint(alloc, "loop: bad arguments ({s}). Usage: /loop [count|duration] [--while|--until '<cmd>'] [prompt]", .{@errorName(err)});
+                    defer alloc.free(msg);
+                    try app.writeDomainNotice(.{ .topic = "loop", .tone = .warning, .body = msg }, true);
+                    return;
+                };
+                var state = parsed orelse {
+                    app.loop_state.clear(alloc);
+                    try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = "loop disabled." }, true);
+                    return;
+                };
+                errdefer state.deinit(alloc);
+                app.loop_state.clear(alloc);
+                state.started_ms = io_mod.milliTimestamp();
+                app.loop_state = state;
+                var summary: std.Io.Writer.Allocating = .init(alloc);
+                defer summary.deinit();
+                summary.writer.writeAll("loop started") catch {};
+                switch (app.loop_state.limit) {
+                    .infinite => summary.writer.writeAll(" (unlimited)") catch {},
+                    .count => |c| summary.writer.print(" (max {d} iterations)", .{c}) catch {},
+                    .duration_ms => |d| summary.writer.print(" (max {d}ms)", .{d}) catch {},
+                }
+                switch (app.loop_state.condition) {
+                    .none => {},
+                    .while_ok => |cmd| summary.writer.print(", while `{s}` exits 0", .{cmd}) catch {},
+                    .until_ok => |cmd| summary.writer.print(", until `{s}` exits 0", .{cmd}) catch {},
+                }
+                if (app.loop_state.prompt.len > 0) {
+                    summary.writer.print("; prompt: {s}", .{app.loop_state.prompt}) catch {};
+                }
+                summary.writer.writeAll(". /loop to stop.") catch {};
+                const body = try alloc.dupe(u8, summary.written());
+                defer alloc.free(body);
+                try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = body }, true);
+                if (comptime @hasDecl(App, "tickLoop")) try app.tickLoop();
+                return;
+            }
+            try app.writeDomainNotice(.{ .topic = "loop", .tone = .warning, .body = "Loop is unavailable in this runtime." }, true);
+        }
+
+        fn commandShowTodo(ctx: *anyopaque) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            const alloc = app.alloc;
+            const AppT = App;
+            if (comptime !@hasField(AppT, "session_persistence")) {
+                return;
+            }
+            const session_dir = (app_session_runtime.Runtime(AppT).activeSessionDisplayPath(app, alloc) catch null) orelse {
+                try app.writeDomainNotice(.{
+                    .topic = "todo",
+                    .tone = .neutral,
+                    .body = "No active session.",
+                }, true);
+                return;
+            };
+            defer alloc.free(session_dir);
+            const todo_path = try std.fs.path.join(alloc, &.{ session_dir, "todo.json" });
+            defer alloc.free(todo_path);
+            var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), todo_path, .{}) catch {
+                try app.writeDomainNotice(.{
+                    .topic = "todo",
+                    .tone = .neutral,
+                    .body = "Todo list is empty.",
+                }, true);
+                return;
+            };
+            defer file.close(io_mod.getIo());
+            const raw = io_mod.readFileToEnd(alloc, &file, 1 << 20) catch {
+                try app.writeDomainNotice(.{
+                    .topic = "todo",
+                    .tone = .neutral,
+                    .body = "Todo list is empty.",
+                }, true);
+                return;
+            };
+            defer alloc.free(raw);
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            defer out.deinit();
+            var lines = std.mem.splitScalar(u8, raw, 10);
+            var any = false;
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                var parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch continue;
+                defer parsed.deinit();
+                if (parsed.value != .object) continue;
+                const tasks = parsed.value.object.get("tasks") orelse continue;
+                if (tasks != .array) continue;
+                for (tasks.array.items, 0..) |item, i| {
+                    if (item != .object) continue;
+                    const text_v = item.object.get("text") orelse continue;
+                    if (text_v != .string) continue;
+                    const status_v = item.object.get("status");
+                    const marker: []const u8 = if (status_v != null and status_v.? == .string) st: {
+                        const s = status_v.?.string;
+                        if (std.mem.eql(u8, s, "in_progress")) break :st "[>]";
+                        if (std.mem.eql(u8, s, "completed")) break :st "[x]";
+                        if (std.mem.eql(u8, s, "abandoned")) break :st "[-]";
+                        if (std.mem.eql(u8, s, "blocked")) break :st "[!]";
+                        break :st "[ ]";
+                    } else "[ ]";
+                    try out.writer.print("{d: >3} {s} {s}\n", .{ i + 1, marker, text_v.string });
+                    any = true;
+                }
+            }
+            const body = if (!any) try alloc.dupe(u8, "Todo list is empty.") else try alloc.dupe(u8, std.mem.trim(u8, out.written(), "\n"));
+            defer alloc.free(body);
+            try app.writeDomainNotice(.{
+                .topic = "todo",
+                .tone = .neutral,
+                .body = body,
             }, true);
         }
 
