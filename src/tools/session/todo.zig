@@ -5,7 +5,6 @@ const io_mod = @import("../../core/shared/io.zig");
 
 const Allocator = std.mem.Allocator;
 
-const max_task_bytes: usize = 512;
 const max_tasks: usize = 256;
 
 pub const Input = struct {
@@ -189,6 +188,18 @@ const TodoState = struct {
         if (self.tasks.items.len == 0) {
             try w.writeAll("Todo list is empty.");
             return alloc.dupe(u8, out.written());
+        }
+        {
+            var done_count: usize = 0;
+            var active_count: usize = 0;
+            for (self.tasks.items) |t| switch (t.status) {
+                .completed => done_count += 1,
+                .in_progress => active_count += 1,
+                else => {},
+            };
+            try w.print("todo . {d}/{d} done", .{ done_count, self.tasks.items.len });
+            if (active_count > 0) try w.print(" . {d} in progress", .{active_count});
+            try w.writeAll("\n");
         }
         for (self.tasks.items, 0..) |t, i| {
             const marker = switch (t.status) {

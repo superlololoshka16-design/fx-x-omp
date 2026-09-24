@@ -251,7 +251,7 @@ pub const Player = struct {
         return true;
     }
 
-    fn reapBeepChild(child: std.process.Child, argv: []const u8, cmd: []u8) void {
+    fn reapBeepChild(child: std.process.Child, argv: []const []const u8, cmd: []u8) void {
         _ = child.wait(io_mod.getIo()) catch {};
         const alloc = std.heap.c_allocator;
         alloc.free(argv);

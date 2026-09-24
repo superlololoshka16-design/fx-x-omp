@@ -4,9 +4,6 @@ const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
-const max_events_bytes: usize = 64 << 20;
-const max_turns: usize = 1 << 20;
-
 pub const TurnNode = struct {
     index: usize,
     preview: []u8,

@@ -526,7 +526,6 @@ const App = struct {
         self.loop_state.last_turn_end_ms = io_mod.milliTimestamp();
     }
 
-
     pub fn promptPolicy(_: *const Self) prompt_policy.Policy {
         return builtin_context.prompt_policy;
     }
@@ -2479,7 +2478,88 @@ const App = struct {
     }
 
     pub fn executeToolCallWithAdvertised(self: *App, request: agent_runtime.ToolExecutionRequest) !ToolExecutionResult {
-        return self.executeToolCall(request);
+        const result = try self.executeToolCall(request);
+        if (result.status == .success and std.mem.eql(u8, request.call.name, "todo")) {
+            self.paintTodoState() catch {};
+        }
+        return result;
+    }
+
+    /// Reads the session todo.json and paints the checklist into the live
+    /// transcript so plan/open/close progress is visible as it happens.
+    fn paintTodoState(self: *App) !void {
+        const session_dir = if (comptime @hasField(App, "session_persistence"))
+            (app_session_runtime.Runtime(App).activeSessionDisplayPath(self, self.alloc) catch null)
+        else
+            null;
+        if (session_dir) |dir| {
+            defer self.alloc.free(dir);
+            const todo_path = std.fs.path.join(self.alloc, &.{ dir, "todo.json" }) catch return;
+            defer self.alloc.free(todo_path);
+            self.paintTodoFile(todo_path);
+            return;
+        }
+        // non-durable fallback: workspace-scoped todo store
+        const home = io_mod.getenv("HOME") orelse return;
+        const scope = if (self.workspace_root.len > 0) self.workspace_root else "default";
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(scope, &hash, .{});
+        const hex_digits = "0123456789abcdef";
+        var file_buf: [21]u8 = undefined;
+        for (hash[0..8], 0..) |b, i| {
+            file_buf[i * 2] = hex_digits[b >> 4];
+            file_buf[i * 2 + 1] = hex_digits[b & 0xf];
+        }
+        @memcpy(file_buf[16..21], ".json");
+        const dir = std.fs.path.join(self.alloc, &.{ home, ".fx", "todos" }) catch return;
+        defer self.alloc.free(dir);
+        const todo_path = std.fs.path.join(self.alloc, &.{ dir, &file_buf }) catch return;
+        defer self.alloc.free(todo_path);
+        self.paintTodoFile(todo_path);
+    }
+
+    fn paintTodoFile(self: *App, path: []const u8) void {
+        var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return;
+        defer file.close(io_mod.getIo());
+        const raw = io_mod.readFileToEnd(self.alloc, &file, 1 << 20) catch return;
+        defer self.alloc.free(raw);
+        var parsed = std.json.parseFromSlice(std.json.Value, self.alloc, raw, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const tasks = parsed.value.object.get("tasks") orelse return;
+        if (tasks != .array) return;
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        var done: usize = 0;
+        var total: usize = 0;
+        for (tasks.array.items, 0..) |item, i| {
+            if (item != .object) continue;
+            const text_v = item.object.get("text") orelse continue;
+            if (text_v != .string) continue;
+            const status_v = item.object.get("status");
+            const marker: []const u8 = if (status_v != null and status_v.? == .string) st: {
+                const s = status_v.?.string;
+                if (std.mem.eql(u8, s, "in_progress")) break :st "[>]";
+                if (std.mem.eql(u8, s, "completed")) break :st "[x]";
+                if (std.mem.eql(u8, s, "abandoned")) break :st "[-]";
+                if (std.mem.eql(u8, s, "blocked")) break :st "[!]";
+                break :st "[ ]";
+            } else "[ ]";
+            if (std.mem.eql(u8, marker, "[x]")) done += 1;
+            total += 1;
+            out.writer.print("  {d: >2} {s} {s}\n", .{ i + 1, marker, text_v.string }) catch return;
+        }
+        if (total == 0) return;
+        var header: [96]u8 = undefined;
+        const head = std.fmt.bufPrint(&header, "todo · {d}/{d}\n", .{ done, total }) catch return;
+        var full: std.Io.Writer.Allocating = .init(self.alloc);
+        defer full.deinit();
+        full.writer.writeAll(head) catch return;
+        full.writer.writeAll(out.written()) catch return;
+        const body = self.alloc.dupe(u8, std.mem.trimRight(u8, full.written(), "\n")) catch return;
+        defer self.alloc.free(body);
+        self.writeDomainNotice(.{ .topic = "todo", .tone = .neutral, .body = body }, true) catch {};
+        self.shell.render_requests.request(.transcript);
     }
 
     pub fn releaseAgentTerminalLease(self: *App, session_id: []const u8) !void {
