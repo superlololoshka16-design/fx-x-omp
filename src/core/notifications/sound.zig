@@ -174,17 +174,19 @@ pub const Player = struct {
         }
     }
 
-    /// Calm 0.5s chime on Linux: generate a soft sine WAV once, replay it via
-    /// aplay/paplay when either exists, otherwise fall back to the terminal
-    /// bell. Generation is lazy and cached under ~/.fx/sounds.
+    /// Calm 0.5s chime on Linux. WSL has no local audio player, so route
+    /// through the Windows host (powershell [Console]::Beep, a real sine tone
+    /// on the host sound device) when interop is available; otherwise try a
+    /// generated WAV via aplay/paplay, then fall back to the terminal bell.
     fn playLinux(self: *Player, cue: Cue) void {
+        if (playWslHostBeep(cue)) return;
         const wav = ensureLinuxChimePath(cue) orelse {
             self.emitBell();
             return;
         };
         const players = [_][]const []const u8{
             &.{ "aplay", "-q" },
-            &.{ "paplay" },
+            &.{"paplay"},
         };
         for (players) |player| {
             var argv_buf: [3][]const u8 = undefined;
@@ -200,6 +202,48 @@ pub const Player = struct {
             return;
         }
         self.emitBell();
+    }
+
+    /// Sounding a 0.5s tone through the Windows host from inside WSL. Returns
+    /// true only when a beep actually ran, so the caller can fall through to
+    /// local players or the bell.
+    fn playWslHostBeep(cue: Cue) bool {
+        if (io_mod.getenv("WSL_DISTRO_NAME") == null) return false;
+        const ps = findWindowsPowershell() orelse return false;
+        // calm, distinct per cue; success is a soft C5, error a low E4
+        const freq: u32 = switch (cue) {
+            .success => 523,
+            .@"error" => 330,
+            else => 440,
+        };
+        var cmd_buf: [96]u8 = undefined;
+        const cmd = std.fmt.bufPrint(
+            &cmd_buf,
+            "[Console]::Beep({d},500)",
+            .{freq},
+        ) catch return false;
+        const argv = [_][]const u8{ ps, "-NoProfile", "-Command", cmd };
+        const alloc = std.heap.c_allocator;
+        const result = std.process.run(alloc, io_mod.getIo(), .{
+            .argv = &argv,
+            .stdout_limit = .limited(64),
+            .stderr_limit = .limited(256),
+        }) catch return false;
+        defer alloc.free(result.stdout);
+        defer alloc.free(result.stderr);
+        return result.term == .exited and result.term.exited == 0;
+    }
+
+    fn findWindowsPowershell() ?[]const u8 {
+        const candidates = [_][]const u8{
+            "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe",
+            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        };
+        for (candidates) |candidate| {
+            const stat = std.Io.Dir.cwd().statFile(io_mod.getIo(), candidate, .{}) catch continue;
+            if (stat.kind == .file) return candidate;
+        }
+        return null;
     }
 
     // Attention notifications always include a terminal BEL so multiplexers
