@@ -428,9 +428,17 @@ const App = struct {
         return null;
     }
 
+    /// Main-thread loop tick (event-loop settle callback). omp semantics:
+    /// the repeating prompt fires 800ms after the agent fully settles;
+    /// turn end arms the fire via armLoopFire.
     pub fn tickLoop(self: *App) !void {
-        if (!self.loop_state.active) return;
+        if (!self.loop_state.active or !self.loop_state.pending_fire) return;
+        if (self.loop_state.prompt == null) return;
+        if (self.stream.active or self.worker.isProcessing() or self.worker.queuedPromptCount() > 0) return;
         const now_ms = io_mod.milliTimestamp();
+        if (now_ms - self.loop_state.last_turn_end_ms < agent_extras.loop_settle_delay_ms) return;
+        self.loop_state.pending_fire = false;
+
         var condition_exit: ?u8 = null;
         switch (self.loop_state.condition) {
             .none => {},
@@ -442,30 +450,22 @@ const App = struct {
                     .timeout_ms = 120_000,
                 };
                 const result = command_runner.executeCommand(cfg, arena_state.allocator(), cmd, self.workspace_root) catch null;
+                condition_exit = 1;
                 if (result) |r| {
                     if (r.command_result) |cr| {
                         if (cr.exit_code) |code| {
-                            const clamped = @min(@max(code, 0), 255);
-                            condition_exit = @intCast(clamped);
-                        } else {
-                            condition_exit = 1;
+                            condition_exit = @intCast(@min(@max(code, 0), 255));
                         }
-                    } else {
-                        condition_exit = 1;
                     }
-                } else {
-                    condition_exit = 1;
                 }
             },
         }
-        const decision = agent_extras.loopShouldContinue(self.loop_state, now_ms, condition_exit);
-        switch (decision) {
+        switch (agent_extras.loopShouldContinue(self.loop_state, now_ms, condition_exit)) {
             .run => {
                 self.loop_state.iterations_run += 1;
-                const prompt = if (self.loop_state.prompt.len > 0) self.loop_state.prompt else "continue";
-                _ = self.enqueuePrompt(prompt) catch false;
+                _ = self.enqueuePrompt(self.loop_state.prompt.?) catch false;
             },
-            .stop_limit, .stop_condition => {
+            .stop_limit, .stop_condition => |decision| {
                 const reason: []const u8 = if (decision == .stop_limit) "limit reached" else "condition met";
                 const msg = std.fmt.allocPrint(self.alloc, "loop stopped after {d} iteration(s): {s}.", .{ self.loop_state.iterations_run, reason }) catch {
                     self.loop_state.clear(self.alloc);
@@ -475,8 +475,16 @@ const App = struct {
                 self.loop_state.clear(self.alloc);
                 self.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = msg }, true) catch {};
             },
+            .wait => {},
         }
     }
+
+    pub fn armLoopFire(self: *App) void {
+        if (!self.loop_state.active or self.loop_state.prompt == null) return;
+        self.loop_state.pending_fire = true;
+        self.loop_state.last_turn_end_ms = io_mod.milliTimestamp();
+    }
+
 
     pub fn promptPolicy(_: *const Self) prompt_policy.Policy {
         return builtin_context.prompt_policy;
@@ -620,8 +628,6 @@ const App = struct {
     upgrader: auto_upgrade.AutoUpgrade = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
     loop_state: agent_extras.LoopState = .{},
-    tree_state: agent_extras.TreeState = .{},
-    tree_snapshot: ?[]types.HistoryTurn = null,
     mcp: app_mcp_runtime.State = .{},
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
@@ -976,10 +982,6 @@ const App = struct {
         shutdown_trace.mark("stop_stream");
 
         self.loop_state.deinit(self.alloc);
-        if (self.tree_snapshot) |snapshot| {
-            types.freeHistoryTurnSlice(self.alloc, snapshot);
-            self.tree_snapshot = null;
-        }
         self.worker.requestShutdown();
         SessionAppRuntime.requestPersistenceShutdown(self);
         self.managed_executions.shutdown();
@@ -3338,6 +3340,7 @@ const App = struct {
 
     pub fn loopSettleInputDeliveryEpoch(ctx: *anyopaque) !void {
         const self: *App = @ptrCast(@alignCast(ctx));
+        if (comptime @hasField(App, "loop_state")) self.tickLoop() catch {};
         if (!InputAppRuntime.terminalPasteActive(self)) return;
         try InputAppRuntime.settleTerminalPasteDeliveryEpochWithLimits(
             self,

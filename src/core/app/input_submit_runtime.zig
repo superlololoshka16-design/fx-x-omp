@@ -1104,6 +1104,9 @@ pub fn SubmitRuntime(comptime App: type) type {
             else
                 try App.enqueuePrompt(app, prompt);
             if (!accepted) return .rejected;
+            if (comptime @hasField(App, "loop_state")) {
+                if (prompt.len > 0) app.loop_state.armWithPrompt(app.alloc, prompt) catch {};
+            }
             return .enqueued;
         }
 

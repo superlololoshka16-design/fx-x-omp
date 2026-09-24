@@ -195,6 +195,7 @@ pub const StatuslineItems = struct {
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
+    loop_label: ?[]const u8 = null,
 };
 
 /// Cell budget for the session title segment. The title is capped at 8 words
@@ -390,6 +391,9 @@ fn appendSessionStatusSegments(
     }
     if (fast_indicator_active) {
         appendStatusSegment(out, end, "⚡︎");
+    }
+    if (statusline.loop_label) |label| {
+        appendStatusSegment(out, end, label);
     }
     if (statusline.session_title) |title| {
         appendStatusSegment(out, end, display_width.prefixByWidth(title, max_session_title_cells));

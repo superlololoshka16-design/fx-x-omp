@@ -1929,39 +1929,35 @@ pub fn Runtime(comptime App: type) type {
             return null;
         }
 
-        fn syncTreeSnapshot(app: *App) !void {
-            if (app.tree_snapshot) |snap| {
-                if (app.tree_state.leaf) |leaf| {
-                    const live = try app.session.snapshotHistory(app.alloc);
-                    defer types.freeHistoryTurnSlice(app.alloc, live);
-                    if (countTreeTurns(live) > leaf) {
-                        types.freeHistoryTurnSlice(app.alloc, snap);
-                        app.tree_snapshot = null;
-                        app.tree_state.leaf = null;
-                    }
-                }
-            }
-            if (app.tree_snapshot == null) {
-                app.tree_snapshot = try app.session.snapshotHistory(app.alloc);
-            }
+        fn treeSessionDir(app: *App, alloc: Allocator) ?[]u8 {
+            const store = app.session_persistence.store orelse return null;
+            const loaded = app.session_persistence.writable orelse return null;
+            return session_store.sessionDirPath(alloc, store.sessions_dir, loaded.active_id) catch null;
         }
 
-        fn clearTreeSnapshot(app: *App) void {
-            if (app.tree_snapshot) |snap| {
-                types.freeHistoryTurnSlice(app.alloc, snap);
-            }
-            app.tree_snapshot = null;
-            app.tree_state.leaf = null;
-        }
-
+        /// Lists EVERY turn in the physical log, marking the active branch and
+        /// the rewind leaf, exactly like omp /tree over the full session file.
         pub fn treeList(app: *App) !void {
-            try syncTreeSnapshot(app);
-            const snapshot = app.tree_snapshot orelse {
-                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+            const store = app.session_persistence.store orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No session store." }, true);
                 return;
             };
-            const nodes = session_tree.scanTurns(app.alloc, snapshot) catch {
-                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+            const loaded = app.session_persistence.writable orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No active session." }, true);
+                return;
+            };
+            var state = store.loadReadOnly(app.alloc, loaded.active_id) catch {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No conversation history for this session." }, true);
+                return;
+            };
+            defer state.deinit(app.alloc);
+
+            const dir = treeSessionDir(app, app.alloc);
+            defer if (dir) |d| app.alloc.free(d);
+            const branch = if (dir) |d| session_tree.loadBranch(app.alloc, d) else null;
+
+            const nodes = session_tree.scanTurns(app.alloc, state.history) catch {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No turns recorded yet." }, true);
                 return;
             };
             defer session_tree.freeTurnNodes(app.alloc, nodes);
@@ -1972,16 +1968,15 @@ pub fn Runtime(comptime App: type) type {
             var out: std.Io.Writer.Allocating = .init(app.alloc);
             defer out.deinit();
             for (nodes) |node| {
-                const marker: []const u8 = if (app.tree_state.leaf) |leaf|
-                    (if (node.index == leaf) " <<" else "   ")
-                else
-                    (if (node.index == nodes.len) " <<" else "   ");
-                out.writer.print("turn {d: >3}{s} {s}\n", .{ node.index, marker, node.preview }) catch {
+                const active = session_tree.turnActive(branch, node.index);
+                const is_leaf = if (branch) |b| (b.leaf != 0 and node.index == b.leaf) else (node.index == nodes.len);
+                const mark: []const u8 = if (is_leaf) " <<" else if (active) "  " else " .";
+                out.writer.print("turn {d: >3}{s} {s}{s}\n", .{ node.index, mark, node.preview, if (active) "" else "  (abandoned)" }) catch {
                     try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Out of memory rendering tree." }, true);
                     return;
                 };
             }
-            out.writer.print("{d} turn(s). Rewind: /tree <n> (moves back or forward; abandoned turns stay in the session log).", .{nodes.len}) catch {};
+            out.writer.print("{d} turn(s) in log. /tree <n> rewinds the active branch (back or forward); abandoned turns stay in the log and survive restart.", .{nodes.len}) catch {};
             const body = try app.alloc.dupe(u8, out.written());
             defer app.alloc.free(body);
             try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = body }, true);
@@ -1996,26 +1991,41 @@ pub fn Runtime(comptime App: type) type {
                 try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Cannot rewind while the agent is working." }, true);
                 return;
             }
-            try syncTreeSnapshot(app);
-            const snapshot = app.tree_snapshot orelse {
-                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No history yet." }, true);
+            const store = app.session_persistence.store orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No session store." }, true);
                 return;
             };
-            if (n == 0) {
-                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Turn numbers start at 1." }, true);
+            const loaded = app.session_persistence.writable orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No active session." }, true);
                 return;
-            }
-            const end = treeSliceEnd(snapshot, n) orelse {
-                const total = countTreeTurns(snapshot);
+            };
+            var state = store.loadReadOnly(app.alloc, loaded.active_id) catch {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No conversation history for this session." }, true);
+                return;
+            };
+            defer state.deinit(app.alloc);
+
+            const total = countTreeTurns(state.history);
+            if (n == 0 or n > total) {
                 const msg = try std.fmt.allocPrint(app.alloc, "Turn {d} is out of range (1..{d}).", .{ n, total });
                 defer app.alloc.free(msg);
                 try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = msg }, true);
                 return;
+            }
+
+            const dir = treeSessionDir(app, app.alloc);
+            if (dir) |d| {
+                defer app.alloc.free(d);
+                session_tree.saveBranch(app.alloc, d, .{ .leaf = n, .physical = total }) catch {};
+            }
+
+            const end = treeSliceEnd(state.history, n) orelse {
+                try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Rewind failed: turn boundary not found." }, true);
+                return;
             };
-            const window = snapshot[0..end];
-            const lang = app.session.languageSnapshot();
+            const window = state.history[0..end];
+            const lang = state.conversation_language;
             try app.session.restore(app.alloc, lang, window);
-            app.tree_state.leaf = n;
 
             var projection = try app.beginResumeProjection();
             defer projection.deinit();
@@ -2030,8 +2040,7 @@ pub fn Runtime(comptime App: type) type {
             try projection.finalize();
             try app.installResumeProjection(&projection);
 
-            const total = countTreeTurns(snapshot);
-            const msg = try std.fmt.allocPrint(app.alloc, "Rewound to turn {d} of {d}. New turns branch from here; abandoned turns remain in the session log. /tree <n> moves again.", .{ n, total });
+            const msg = try std.fmt.allocPrint(app.alloc, "Rewound to turn {d} of {d}. The model now forgets turns after {d}; they stay in the log. /tree <n> moves again (survives restart).", .{ n, total, n });
             defer app.alloc.free(msg);
             try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = msg }, true);
         }
@@ -2135,13 +2144,28 @@ pub fn Runtime(comptime App: type) type {
                     state.recovery_checkpoint,
                 );
             }
+            // Persistent /tree: reconstruct only the active branch so the model
+            // forgets abandoned turns across restart. The log stays append-only;
+            // `filtered` is a temp copy freed right after restore dupes it again.
+            var tree_filtered: ?[]types.HistoryTurn = null;
+            hydrate: {
+                const loaded_ref = app.session_persistence.writable orelse break :hydrate;
+                const store_ref = app.session_persistence.store orelse break :hydrate;
+                const dir = session_store.sessionDirPath(app.alloc, store_ref.sessions_dir, loaded_ref.active_id) catch break :hydrate;
+                defer app.alloc.free(dir);
+                const branch = session_tree.loadBranch(app.alloc, dir) orelse break :hydrate;
+                if (branch.leaf == 0) break :hydrate;
+                tree_filtered = session_tree.filterToBranch(app.alloc, state.history, branch) catch break :hydrate;
+            }
+            defer if (tree_filtered) |f| types.freeHistoryTurnSlice(app.alloc, f);
+            const effective_history: []const types.HistoryTurn = tree_filtered orelse state.history;
             try app.session.restoreWithPermissionState(
                 app.alloc,
                 state.conversation_language,
-                state.history,
+                effective_history,
                 state.permission_state,
             );
-            updateStaleShellHandles(app, state.history);
+            updateStaleShellHandles(app, effective_history);
             if (state.usage) |usage| {
                 try app.session.usage.restore(
                     app.alloc,
@@ -5154,7 +5178,6 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn closeWritableSession(app: *App) void {
-            if (comptime @hasField(App, "tree_snapshot")) clearTreeSnapshot(app);
             app.session_persistence.resume_handoff_intent = .none;
             _ = closeWritableSessionWithResumeHandoff(app);
         }

@@ -1284,59 +1284,51 @@ pub fn Handlers(comptime App: type) type {
             if (comptime @hasField(App, "loop_state")) {
                 const alloc = app.alloc;
                 const arg = std.mem.trim(u8, rest, " \t");
-                if (arg.len == 0) {
-                    if (app.loop_state.active) {
-                        const ran = app.loop_state.iterations_run;
-                        app.loop_state.clear(alloc);
-                        const msg = try std.fmt.allocPrint(alloc, "loop disabled after {d} iteration(s).", .{ran});
-                        defer alloc.free(msg);
-                        try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = msg }, true);
-                    } else {
-                        try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = "loop is not active. Usage: /loop [count|duration] [--while|--until '<cmd>'] [prompt]" }, true);
-                    }
+                if (app.loop_state.active) {
+                    const ran = app.loop_state.iterations_run;
+                    app.loop_state.clear(alloc);
+                    const msg = try std.fmt.allocPrint(alloc, "Loop mode disabled after {d} iteration(s).", .{ran});
+                    defer alloc.free(msg);
+                    try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = msg }, true);
+                    app.shell.render_requests.request(.footer);
                     return;
                 }
-                const parsed = agent_extras.parseLoopArgs(alloc, arg) catch |err| {
+                var state = agent_extras.parseLoopArgs(alloc, arg) catch |err| {
                     const msg = try std.fmt.allocPrint(alloc, "loop: bad arguments ({s}). Usage: /loop [count|duration] [--while|--until '<cmd>'] [prompt]", .{@errorName(err)});
                     defer alloc.free(msg);
                     try app.writeDomainNotice(.{ .topic = "loop", .tone = .warning, .body = msg }, true);
                     return;
                 };
-                var state = parsed orelse {
-                    app.loop_state.clear(alloc);
-                    try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = "loop disabled." }, true);
-                    return;
-                };
                 errdefer state.deinit(alloc);
-                app.loop_state.clear(alloc);
                 state.started_ms = io_mod.milliTimestamp();
                 app.loop_state = state;
                 var summary: std.Io.Writer.Allocating = .init(alloc);
                 defer summary.deinit();
-                summary.writer.writeAll("loop started") catch {};
+                summary.writer.writeAll("Loop mode enabled.") catch {};
                 switch (app.loop_state.limit) {
-                    .infinite => summary.writer.writeAll(" (unlimited)") catch {},
-                    .count => |c| summary.writer.print(" (max {d} iterations)", .{c}) catch {},
-                    .duration_ms => |d| summary.writer.print(" (max {d}ms)", .{d}) catch {},
+                    .infinite => {},
+                    .count => |c| summary.writer.print(" Limited to {d} iterations.", .{c}) catch {},
+                    .duration_ms => |d| summary.writer.print(" Limited to {d}ms.", .{d}) catch {},
                 }
                 switch (app.loop_state.condition) {
                     .none => {},
-                    .while_ok => |cmd| summary.writer.print(", while `{s}` exits 0", .{cmd}) catch {},
-                    .until_ok => |cmd| summary.writer.print(", until `{s}` exits 0", .{cmd}) catch {},
+                    .while_ok => |cmd| summary.writer.print(" Continuing while `{s}` exits 0.", .{cmd}) catch {},
+                    .until_ok => |cmd| summary.writer.print(" Continuing until `{s}` exits 0.", .{cmd}) catch {},
                 }
-                if (app.loop_state.prompt.len > 0) {
-                    summary.writer.print("; prompt: {s}", .{app.loop_state.prompt}) catch {};
+                if (app.loop_state.prompt) |lp| {
+                    summary.writer.print(" Repeating prompt: {s}", .{lp}) catch {};
+                } else {
+                    summary.writer.writeAll(" The next prompt you send repeats each time the agent finishes.") catch {};
                 }
-                summary.writer.writeAll(". /loop to stop.") catch {};
+                summary.writer.writeAll(" /loop to disable.") catch {};
                 const body = try alloc.dupe(u8, summary.written());
                 defer alloc.free(body);
                 try app.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = body }, true);
-                if (comptime @hasDecl(App, "tickLoop")) try app.tickLoop();
+                app.shell.render_requests.request(.footer);
                 return;
             }
             try app.writeDomainNotice(.{ .topic = "loop", .tone = .warning, .body = "Loop is unavailable in this runtime." }, true);
         }
-
         fn commandShowTodo(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             const alloc = app.alloc;

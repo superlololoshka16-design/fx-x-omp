@@ -883,6 +883,9 @@ pub fn Runtime(comptime App: type) type {
                     items.session_title = app_session_runtime.Runtime(App).cachedSessionTitle(app);
                 }
             }
+            if (comptime @hasField(App, "loop_state")) {
+                items.loop_label = app.loop_state.statusLabel();
+            }
             return items;
         }
 

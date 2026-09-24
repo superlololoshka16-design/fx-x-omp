@@ -1212,7 +1212,7 @@ pub fn Runtime(comptime App: type) type {
                                 .presentation_failed => |err| return err,
                             },
                         }
-                        if (comptime @hasDecl(App, "tickLoop")) app.tickLoop() catch {};
+                        if (comptime @hasDecl(App, "armLoopFire")) app.armLoopFire();
                     },
                     .session_grant => |grant| {
                         try handlers.session_grant(handlers.ctx, grant);
