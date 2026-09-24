@@ -53,6 +53,7 @@ const prompt_policy = @import("core/config/prompt_policy.zig");
 const builtin_commands = @import("builtins/commands.zig");
 const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
+const agent_extras = @import("core/agent/agent_extras.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const builtin_providers = @import("builtins/providers.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
@@ -427,6 +428,56 @@ const App = struct {
         return null;
     }
 
+    pub fn tickLoop(self: *App) !void {
+        if (!self.loop_state.active) return;
+        const now_ms = io_mod.milliTimestamp();
+        var condition_exit: ?u8 = null;
+        switch (self.loop_state.condition) {
+            .none => {},
+            .while_ok, .until_ok => |cmd| {
+                var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+                defer arena_state.deinit();
+                const cfg = command_runner.Config{
+                    .max_command_output_bytes = 256 * 1024,
+                    .timeout_ms = 120_000,
+                };
+                const result = command_runner.executeCommand(cfg, arena_state.allocator(), cmd, self.workspace_root) catch null;
+                if (result) |r| {
+                    if (r.command_result) |cr| {
+                        if (cr.exit_code) |code| {
+                            const clamped = @min(@max(code, 0), 255);
+                            condition_exit = @intCast(clamped);
+                        } else {
+                            condition_exit = 1;
+                        }
+                    } else {
+                        condition_exit = 1;
+                    }
+                } else {
+                    condition_exit = 1;
+                }
+            },
+        }
+        const decision = agent_extras.loopShouldContinue(self.loop_state, now_ms, condition_exit);
+        switch (decision) {
+            .run => {
+                self.loop_state.iterations_run += 1;
+                const prompt = if (self.loop_state.prompt.len > 0) self.loop_state.prompt else "continue";
+                _ = self.enqueuePrompt(prompt) catch false;
+            },
+            .stop_limit, .stop_condition => {
+                const reason: []const u8 = if (decision == .stop_limit) "limit reached" else "condition met";
+                const msg = std.fmt.allocPrint(self.alloc, "loop stopped after {d} iteration(s): {s}.", .{ self.loop_state.iterations_run, reason }) catch {
+                    self.loop_state.clear(self.alloc);
+                    return;
+                };
+                defer self.alloc.free(msg);
+                self.loop_state.clear(self.alloc);
+                self.writeDomainNotice(.{ .topic = "loop", .tone = .neutral, .body = msg }, true) catch {};
+            },
+        }
+    }
+
     pub fn promptPolicy(_: *const Self) prompt_policy.Policy {
         return builtin_context.prompt_policy;
     }
@@ -568,6 +619,9 @@ const App = struct {
     legacy_process_provider: process_provider.Provider = process_provider.unavailable_provider,
     upgrader: auto_upgrade.AutoUpgrade = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
+    loop_state: agent_extras.LoopState = .{},
+    tree_state: agent_extras.TreeState = .{},
+    tree_snapshot: ?[]types.HistoryTurn = null,
     mcp: app_mcp_runtime.State = .{},
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
@@ -921,6 +975,11 @@ const App = struct {
         self.stopStream();
         shutdown_trace.mark("stop_stream");
 
+        self.loop_state.deinit(self.alloc);
+        if (self.tree_snapshot) |snapshot| {
+            types.freeHistoryTurnSlice(self.alloc, snapshot);
+            self.tree_snapshot = null;
+        }
         self.worker.requestShutdown();
         SessionAppRuntime.requestPersistenceShutdown(self);
         self.managed_executions.shutdown();
@@ -3467,6 +3526,8 @@ fn runNonBenchmark(raw_args: []const [*:0]const u8, raw_env: RawEnviron, cli_arg
         try writeStderrFast("fx: FX_AUTH_MODE must be local or host-managed\n");
         exitFast(1);
     };
+    resolveExternalSystemPrompt(raw_env);
+
     const cfg = if (cli_args.len == 0)
         emptyEntryConfig(auth_mode)
     else if (needsFullEntryConfig(cli_args))
@@ -3840,6 +3901,44 @@ test "native app preserves the built-in tool set without workspace metadata" {
     try std.testing.expectEqual(builtin_tools.advertisement_set.order.len, advertised.order.len);
 }
 
+var loaded_custom_system_prompt: ?[]u8 = null;
+
+fn readPromptFile(alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return null;
+    defer file.close(io_mod.getIo());
+    const bytes = io_mod.readFileToEnd(alloc, &file, 1 << 20) catch return null;
+    if (bytes.len == 0) {
+        alloc.free(bytes);
+        return null;
+    }
+    return bytes;
+}
+
+fn resolveExternalSystemPrompt(raw_env: RawEnviron) void {
+    if (loaded_custom_system_prompt != null) return;
+    const alloc = processAllocator();
+    if (rawEnvValue(raw_env, "FX_SYSTEM_PROMPT")) |env_path| {
+        if (readPromptFile(alloc, env_path)) |bytes| {
+            loaded_custom_system_prompt = bytes;
+            return;
+        }
+    }
+    if (io_mod.getenv("HOME")) |home| {
+        const path = std.fs.path.join(alloc, &.{ home, ".fx", "system-prompt.md" }) catch return;
+        defer alloc.free(path);
+        if (readPromptFile(alloc, path)) |bytes| {
+            loaded_custom_system_prompt = bytes;
+            return;
+        }
+    }
+}
+
+fn entryPromptPolicy() prompt_policy.Policy {
+    var policy = builtin_context.prompt_policy;
+    if (loaded_custom_system_prompt) |sp| policy.system_prompt = sp;
+    return policy;
+}
+
 fn fullEntryConfig(auth_mode: credentials.AuthMode) app_entry_runtime.Config {
     return .{
         .version = version,
@@ -3857,7 +3956,7 @@ fn fullEntryConfig(auth_mode: credentials.AuthMode) app_entry_runtime.Config {
         .process_provider = shell_process_provider.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,
-        .prompt_policy = builtin_context.prompt_policy,
+        .prompt_policy = entryPromptPolicy(),
         .skill_root_policy = builtin_skills.root_policy,
         .ignored_list_entries = &ignored_list_entries,
         .max_list_entries = max_list_entries,
