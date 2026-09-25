@@ -104,15 +104,14 @@ pub fn scanPeers(alloc: Allocator, hub_root: []const u8) ![]Peer {
         const path = try std.fs.path.join(alloc, &.{ hub_root, entry.name });
         defer alloc.free(path);
         var msgs: usize = 0;
-        if (std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{})) |*file| {
-            defer file.close(io_mod.getIo());
-            if (io_mod.readFileToEnd(alloc, file, 4 << 20)) |raw| {
-                defer alloc.free(raw);
-                var lines = std.mem.splitScalar(u8, raw, '\n');
-                while (lines.next()) |line| {
-                    if (std.mem.trim(u8, line, " \t\r").len > 0) msgs += 1;
-                }
-            } else |_| {}
+        var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch continue;
+        defer file.close(io_mod.getIo());
+        if (io_mod.readFileToEnd(alloc, &file, 4 << 20)) |raw| {
+            defer alloc.free(raw);
+            var lines = std.mem.splitScalar(u8, raw, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.trim(u8, line, " \t\r").len > 0) msgs += 1;
+            }
         } else |_| {}
         try out.append(alloc, .{ .name = try alloc.dupe(u8, peer), .messages = msgs });
     }

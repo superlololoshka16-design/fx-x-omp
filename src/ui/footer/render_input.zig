@@ -266,6 +266,8 @@ pub const TreeMenuProjection = struct {
     }
 };
 
+pub const HubPeer = @import("../../core/input/hub_menu.zig").Peer;
+
 pub const HubMenuProjection = struct {
     active: bool = false,
     peers: []const HubPeer = &.{},
@@ -327,11 +329,6 @@ pub fn hubMenuProjection(menu: *const @import("../../core/input/hub_menu.zig").H
         .open_body = menu.open_body,
     };
 }
-
-pub const HubPeer = struct {
-    name: []const u8,
-    messages: usize,
-};
 
 pub const HelpMenuProjection = struct {
     active: bool = false,
