@@ -120,19 +120,66 @@ pub const ParallelRunOptions = struct {
     attempt_observer: ?ParallelAttemptObserver = null,
 };
 
-const ParallelCompletionState = struct {
-    mutex: std.Io.Mutex = .init,
-    changed: std.Io.Condition = .init,
+/// Cross-thread completion handoff. Multi-producer (one worker per slot)
+/// single-consumer Treiber stack over slot indices, gated by a futex Event so
+/// the collector parks instead of busy-looping. Each slot publishes exactly
+/// once per run, so indices are never recycled: the stack is ABA-free by
+/// construction and needs no hazard pointer or epoch reclamation.
+const CompletionQueue = struct {
+    /// Stack head, or `empty` when drained. align(64) keeps the push CAS off
+    /// the per-slot cache lines workers hammer.
+    head: std.atomic.Value(usize) align(64) = .init(empty),
+    /// Sticky wake hint set by every pusher. align(64) isolates it from `head`
+    /// so the wake signal never write-shares the CAS loop's cache line.
+    progress: std.Io.Event align(64) = .unset,
+
+    const empty: usize = @max(usize);
+
+    /// Publishes `index` after the worker has written its slot payload. The
+    /// release-CAS on `head` orders those plain writes before any consumer
+    /// acquire-load, so result/err need no atomics of their own.
+    fn push(self: *CompletionQueue, slot: *ParallelWorkerSlot, index: usize, io: std.Io) void {
+        var head = self.head.load(.acquire);
+        while (true) {
+            slot.next.store(head, .relaxed);
+            if (self.head.cmpxchgWeak(head, index, .acq_rel, .acquire)) |prev| {
+                head = prev;
+                continue;
+            }
+            break;
+        }
+        self.progress.set(io);
+    }
+
+    /// Pops one completed index without blocking, or null when empty. Single
+    /// consumer: reading `slots[head].next` is race-free because only that
+    /// slot's own worker ever writes it, once, before head became `head`.
+    fn tryPop(self: *CompletionQueue, slots: []ParallelWorkerSlot) ?usize {
+        var head = self.head.load(.acquire);
+        while (head != empty) {
+            const next = slots[head].next.load(.relaxed);
+            if (self.head.cmpxchgWeak(head, next, .acq_rel, .acquire)) |prev| {
+                head = prev;
+                continue;
+            }
+            return head;
+        }
+        return null;
+    }
 };
 
 const ParallelWorkerSlot = struct {
+    /// Treiber-stack link; written once by this slot's worker right before it
+    /// publishes. align(64) isolates the push CAS from sibling slots so
+    /// concurrent workers never bounce each other's cache lines.
+    next: std.atomic.Value(usize) align(64) = .init(CompletionQueue.empty),
     arena_state: std.heap.ArenaAllocator,
     thread: ?std.Thread = null,
+    /// Plain payload published before the push's release-CAS and read after
+    /// the collector's acquire-load; the head atomic supplies the ordering.
     result: ?ToolExecutionResult = null,
     err: ?anyerror = null,
     owner_cancelled_at_error: bool = false,
-    completed: bool = false,
-    observed: bool = false,
 };
 
 pub fn runSequentialCalls(
@@ -178,7 +225,7 @@ pub fn runParallelCalls(
     calls: []const ToolCall,
     options: ParallelRunOptions,
 ) Allocator.Error!ParallelRunResult {
-    var completion_state = ParallelCompletionState{};
+    var completion_queue = CompletionQueue{};
     const slots = try alloc.alloc(ParallelWorkerSlot, calls.len);
     defer alloc.free(slots);
     for (slots) |*slot| {
@@ -204,15 +251,12 @@ pub fn runParallelCalls(
 
     var started: usize = 0;
     for (calls, 0..) |call, index| {
-        slots[index].thread = std.Thread.spawn(.{}, parallelWorkerMain, .{ &completion_state, &slots[index], options, call, index }) catch |err| {
+        slots[index].thread = std.Thread.spawn(.{}, parallelWorkerMain, .{ &completion_queue, &slots[index], options, call, index }) catch {
             for (slots[0..started]) |*slot| {
                 if (slot.thread) |thread| thread.join();
                 slot.thread = null;
             }
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                else => error.OutOfMemory,
-            };
+            return error.OutOfMemory;
         };
         started += 1;
     }
@@ -220,7 +264,7 @@ pub fn runParallelCalls(
     var completed_count: usize = 0;
     var first_cancelled_index: ?usize = null;
     while (completed_count < started) : (completed_count += 1) {
-        const index = waitForCompletedSlot(&completion_state, slots);
+        const index = waitForCompletedSlot(&completion_queue, slots);
         const slot = &slots[index];
         if (slot.thread) |thread| {
             thread.join();
@@ -245,13 +289,13 @@ pub fn runParallelCalls(
 }
 
 fn parallelWorkerMain(
-    completion_state: *ParallelCompletionState,
+    completion_queue: *CompletionQueue,
     slot: *ParallelWorkerSlot,
     options: ParallelRunOptions,
     call: ToolCall,
     index: usize,
 ) void {
-    defer markParallelWorkerCompleted(completion_state, slot);
+    defer completion_queue.push(slot, index, io_mod.getIo());
     if (cancelRequested(options.cancel_flag)) {
         slot.err = error.Cancelled;
         slot.owner_cancelled_at_error = true;
@@ -266,25 +310,19 @@ fn parallelWorkerMain(
     };
 }
 
-fn markParallelWorkerCompleted(state: *ParallelCompletionState, slot: *ParallelWorkerSlot) void {
+/// Blocks until a worker publishes, returning its slot index. Pops from the
+/// lock-free stack first; only parks on the futex when the stack is empty. The
+/// reset/re-check between the failed pop and the wait closes the lost-wakeup
+/// window without any lock: a pusher publishes head before setting progress,
+/// so an empty second pop proves no set has run yet and the following wait
+/// still observes the eventual wake.
+fn waitForCompletedSlot(queue: *CompletionQueue, slots: []ParallelWorkerSlot) usize {
     const io = io_mod.getIo();
-    state.mutex.lockUncancelable(io);
-    slot.completed = true;
-    state.changed.broadcast(io);
-    state.mutex.unlock(io);
-}
-
-fn waitForCompletedSlot(state: *ParallelCompletionState, slots: []ParallelWorkerSlot) usize {
-    const io = io_mod.getIo();
-    state.mutex.lockUncancelable(io);
-    defer state.mutex.unlock(io);
     while (true) {
-        for (slots, 0..) |*slot, index| {
-            if (!slot.completed or slot.observed) continue;
-            slot.observed = true;
-            return index;
-        }
-        state.changed.waitUncancelable(io, &state.mutex);
+        if (queue.tryPop(slots)) |index| return index;
+        queue.progress.reset();
+        if (queue.tryPop(slots)) |index| return index;
+        queue.progress.waitUncancelable(io);
     }
 }
 

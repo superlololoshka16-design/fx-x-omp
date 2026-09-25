@@ -417,42 +417,12 @@ fn publishAssistantChunkResolved(stream_ctx: *StreamChunkContext, chunk: []const
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
 
-    var completion = assistant_presentation.TableCompletion{
-        .ctx = stream_ctx,
-        .deliver = deliverSemanticTable,
-    };
-    var code_completion = assistant_presentation.CodeBlockCompletion{
-        .ctx = stream_ctx,
-        .deliver = deliverSemanticCodeBlock,
-    };
-    var thematic_rule_completion = assistant_presentation.ThematicRuleCompletion{
-        .ctx = stream_ctx,
-        .deliver = deliverSemanticThematicRule,
-    };
-    const table_completion: ?*const assistant_presentation.TableCompletion = if (stream_ctx.semantic_presentation != null)
-        &completion
-    else
-        null;
-    const semantic_code_completion: ?*const assistant_presentation.CodeBlockCompletion = if (stream_ctx.semantic_presentation != null)
-        &code_completion
-    else
-        null;
-    const semantic_thematic_rule_completion: ?*const assistant_presentation.ThematicRuleCompletion = if (stream_ctx.semantic_presentation != null)
-        &thematic_rule_completion
-    else
-        null;
+    var completion_set = MarkdownCompletionSet.init(stream_ctx);
+    const completions = completion_set.completions(stream_ctx.semantic_presentation != null);
     if (initial_prefix_to_emit) |prefix| {
-        try stream_ctx.markdown.pushWithCompletions(alloc, prefix, &out, .{
-            .table = table_completion,
-            .code = semantic_code_completion,
-            .thematic_rule = semantic_thematic_rule_completion,
-        });
+        try stream_ctx.markdown.pushWithCompletions(alloc, prefix, &out, completions);
     }
-    try stream_ctx.markdown.pushWithCompletions(alloc, chunk[start..], &out, .{
-        .table = table_completion,
-        .code = semantic_code_completion,
-        .thematic_rule = semantic_thematic_rule_completion,
-    });
+    try stream_ctx.markdown.pushWithCompletions(alloc, chunk[start..], &out, completions);
     if (out.items.len == 0) return;
     try stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .assistant_rendered = out.items });
     stream_ctx.recordTextOutput(out.items);
@@ -510,17 +480,7 @@ fn beginsFootnoteProjection(text: []const u8) bool {
 
 fn deliverSemanticTable(raw: *anyopaque, table: TablePayload, out: *std.ArrayList(u8)) !void {
     const stream_ctx: *StreamChunkContext = @ptrCast(@alignCast(raw));
-    const alloc = stream_ctx.alloc;
-
-    if (out.items.len > 0) {
-        try stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .assistant_rendered = out.items });
-        stream_ctx.recordTextOutput(out.items);
-        out.clearRetainingCapacity();
-    }
-
-    var compatibility: std.ArrayList(u8) = .empty;
-    defer compatibility.deinit(alloc);
-    try assistant_presentation.renderTablePayload(alloc, table, &compatibility);
+    try flushPendingRenderedText(stream_ctx, out);
     const sink = stream_ctx.semantic_presentation orelse return error.MissingTableSink;
     try sink.table(sink.ctx, table);
     stream_ctx.recordSemanticBoundary();
@@ -528,17 +488,7 @@ fn deliverSemanticTable(raw: *anyopaque, table: TablePayload, out: *std.ArrayLis
 
 fn deliverSemanticCodeBlock(raw: *anyopaque, block: CodeBlockPayload, out: *std.ArrayList(u8)) !void {
     const stream_ctx: *StreamChunkContext = @ptrCast(@alignCast(raw));
-    const alloc = stream_ctx.alloc;
-
-    if (out.items.len > 0) {
-        try stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .assistant_rendered = out.items });
-        stream_ctx.recordTextOutput(out.items);
-        out.clearRetainingCapacity();
-    }
-
-    var compatibility: std.ArrayList(u8) = .empty;
-    defer compatibility.deinit(alloc);
-    try assistant_presentation.renderCodeBlockPayload(alloc, block, &compatibility);
+    try flushPendingRenderedText(stream_ctx, out);
     const sink = stream_ctx.semantic_presentation orelse return error.MissingCodeBlockSink;
     try sink.code_block(sink.ctx, block);
     stream_ctx.recordSemanticBoundary();
@@ -546,20 +496,19 @@ fn deliverSemanticCodeBlock(raw: *anyopaque, block: CodeBlockPayload, out: *std.
 
 fn deliverSemanticThematicRule(raw: *anyopaque, out: *std.ArrayList(u8)) !void {
     const stream_ctx: *StreamChunkContext = @ptrCast(@alignCast(raw));
-    const alloc = stream_ctx.alloc;
-
-    if (out.items.len > 0) {
-        try stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .assistant_rendered = out.items });
-        stream_ctx.recordTextOutput(out.items);
-        out.clearRetainingCapacity();
-    }
-
-    var compatibility: std.ArrayList(u8) = .empty;
-    defer compatibility.deinit(alloc);
-    try assistant_presentation.writeHorizontalRule(alloc, &compatibility);
+    try flushPendingRenderedText(stream_ctx, out);
     const sink = stream_ctx.semantic_presentation orelse return error.MissingThematicRuleSink;
     try sink.thematic_rule(sink.ctx);
     stream_ctx.recordSemanticBoundary();
+}
+
+/// Publishes and clears the pending rendered-text buffer ahead of a semantic
+/// block so the block lands on its own presentation row.
+fn flushPendingRenderedText(stream_ctx: *StreamChunkContext, out: *std.ArrayList(u8)) !void {
+    if (out.items.len == 0) return;
+    try stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .assistant_rendered = out.items });
+    stream_ctx.recordTextOutput(out.items);
+    out.clearRetainingCapacity();
 }
 
 pub fn emitProviderLengthNotice(hooks: *const AgentRuntimeDeps, arena: Allocator, disposition: types.ProviderCompletionDisposition) !void {

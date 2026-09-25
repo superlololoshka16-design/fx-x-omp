@@ -287,14 +287,7 @@ fn request_union_schema_advertised(
 fn subagent_request_schema_advertised(
     advertised_functions: []const model_tool_schema.FunctionSchema,
 ) bool {
-    for (advertised_functions) |function| {
-        if (!std.mem.eql(u8, function.name, "subagent")) continue;
-        return model_tool_schema.isSingleRequiredObjectUnionField(
-            function.input_schema,
-            "request",
-        );
-    }
-    return false;
+    return request_union_schema_advertised(advertised_functions, "subagent");
 }
 
 fn terminal_request_schema_advertised(
@@ -312,18 +305,11 @@ fn read_tool_result_request_schema_advertised(
     );
 }
 
-fn terminal_request_normalization_eligible(
-    base_nested_terminal_advertised: bool,
+fn request_normalization_eligible(
+    base_nested_advertised: bool,
     vision_mode: runtime_gateway_step.VisionToolMode,
 ) bool {
-    return base_nested_terminal_advertised and vision_mode != .required;
-}
-
-fn subagent_request_normalization_eligible(
-    base_nested_subagent_advertised: bool,
-    vision_mode: runtime_gateway_step.VisionToolMode,
-) bool {
-    return base_nested_subagent_advertised and vision_mode != .required;
+    return base_nested_advertised and vision_mode != .required;
 }
 
 fn terminal_action_is(object: std.json.ObjectMap, action_name: []const u8) bool {
@@ -1587,8 +1573,8 @@ test "subagent request normalization follows effective attempt advertisement" {
     };
 
     try std.testing.expect(subagent_request_schema_advertised(&.{nested.model_schema}));
-    try std.testing.expect(subagent_request_normalization_eligible(true, .optional));
-    try std.testing.expect(!subagent_request_normalization_eligible(true, .required));
+    try std.testing.expect(request_normalization_eligible(true, .optional));
+    try std.testing.expect(!request_normalization_eligible(true, .required));
     const normalized = try normalize_subagent_request_tool_calls(
         arena,
         registry,
@@ -1650,10 +1636,10 @@ test "shell request normalization follows effective attempt advertisement" {
     try std.testing.expect(terminal_request_schema_advertised(&.{nested.model_schema}));
     try std.testing.expect(!terminal_request_schema_advertised(&.{flat.model_schema}));
     try std.testing.expect(!terminal_request_schema_advertised(&.{}));
-    try std.testing.expect(terminal_request_normalization_eligible(true, .unavailable));
-    try std.testing.expect(terminal_request_normalization_eligible(true, .optional));
-    try std.testing.expect(!terminal_request_normalization_eligible(true, .required));
-    try std.testing.expect(!terminal_request_normalization_eligible(false, .unavailable));
+    try std.testing.expect(request_normalization_eligible(true, .unavailable));
+    try std.testing.expect(request_normalization_eligible(true, .optional));
+    try std.testing.expect(!request_normalization_eligible(true, .required));
+    try std.testing.expect(!request_normalization_eligible(false, .unavailable));
 }
 
 test "terminal inferred model input round trips every atomic write payload" {
@@ -7329,16 +7315,16 @@ fn processQueuedPromptLoop(
                     recovery_source_messages.len - projected_request_messages.len,
                 });
             }
-            const terminal_request_eligible = terminal_request_normalization_eligible(
+            const terminal_request_eligible = request_normalization_eligible(
                 base_nested_terminal_advertised,
                 vision_mode,
             );
-            const subagent_request_eligible = subagent_request_normalization_eligible(
+            const subagent_request_eligible = request_normalization_eligible(
                 base_nested_subagent_advertised,
                 vision_mode,
             );
             const read_tool_result_request_eligible =
-                terminal_request_normalization_eligible(
+                request_normalization_eligible(
                     base_nested_read_tool_result_advertised,
                     vision_mode,
                 );
