@@ -31,6 +31,8 @@ const skills_menu_presentation = @import("../../ui/footer/skills_menu_presentati
 const model_menu_presentation = @import("../../ui/footer/model_menu_presentation.zig");
 const resume_menu_presentation = @import("../../ui/footer/resume_menu_presentation.zig");
 const help_menu_presentation = @import("../../ui/footer/help_menu_presentation.zig");
+const tree_menu_presentation = @import("../../ui/footer/tree_menu_presentation.zig");
+const hub_menu_presentation = @import("../../ui/footer/hub_menu_presentation.zig");
 const settings_menu_presentation = @import("../../ui/footer/settings_menu_presentation.zig");
 const surface_frame = @import("../../ui/footer/surface_frame.zig");
 const footer_paint_plan = @import("../../ui/footer/paint_plan.zig");
@@ -387,6 +389,8 @@ pub fn CompletionRuntime(comptime App: type) type {
         }
 
         fn routeNonSlashPickerMove(app: *App, delta: i32) !bool {
+            if (try routeTreeMenuMove(app, delta)) return true;
+            if (try routeHubMenuMove(app, delta)) return true;
             if (try routeSettingsMenuMove(app, delta)) return true;
             if (try routeHelpMenuMove(app, delta)) return true;
             if (try routeModelMenuMove(app, delta)) return true;
@@ -444,6 +448,33 @@ pub fn CompletionRuntime(comptime App: type) type {
                 try inlineMenuRowBudget(app, settings_menu_presentation.max_inline_rows),
             );
             return menu.move(&snapshot, app.input_runtime.edit_state.input.items, delta, visible_items);
+        }
+
+        fn routeTreeMenuMove(app: *App, delta: i32) !bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "tree_menu")) return false;
+            const menu = &app.input_runtime.tree_menu;
+            if (!menu.active) return false;
+            const projection = render_input.treeMenuProjection(menu);
+            const visible_items = tree_menu_presentation.visibleNavigationItemsForBudget(
+                projection,
+                app.shell.layout.cols,
+                try inlineMenuRowBudget(app, tree_menu_presentation.max_inline_rows),
+            );
+            return menu.move(delta, visible_items);
+        }
+
+        fn routeHubMenuMove(app: *App, delta: i32) !bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "hub_menu")) return false;
+            const menu = &app.input_runtime.hub_menu;
+            if (!menu.active) return false;
+            if (menu.open_peer != null) return true; // mailbox view: swallow arrows
+            const projection = render_input.hubMenuProjection(menu);
+            const visible_items = hub_menu_presentation.visibleNavigationItemsForBudget(
+                projection,
+                app.shell.layout.cols,
+                try inlineMenuRowBudget(app, hub_menu_presentation.max_inline_rows),
+            );
+            return menu.move(delta, visible_items);
         }
 
         fn routeHelpMenuMove(app: *App, delta: i32) !bool {

@@ -1267,7 +1267,7 @@ pub fn Handlers(comptime App: type) type {
             if (comptime @hasField(App, "session_persistence")) {
                 const arg = std.mem.trim(u8, rest, " \t");
                 if (arg.len == 0) {
-                    try app_session_runtime.Runtime(App).treeList(app);
+                    try app_session_runtime.Runtime(App).openTreeMenu(app);
                     return;
                 }
                 const n = std.fmt.parseInt(usize, arg, 10) catch {
@@ -1330,70 +1330,23 @@ pub fn Handlers(comptime App: type) type {
             }
             try app.writeDomainNotice(.{ .topic = "loop", .tone = .warning, .body = "Loop is unavailable in this runtime." }, true);
         }
-        /// /hub — UI window into the agent message bus (~/.fx/hub).
-        /// Bare: peer list + unread counts. /hub <peer>: full mailbox, left intact.
+        /// /hub — live agent-hub panel (omp parity): peer list with message
+        /// counts, Enter opens a mailbox (read-only), backspace goes back,
+        /// Esc closes. Agents drain their own mailboxes via the hub tool.
         fn commandShowHub(ctx: *anyopaque, rest: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            const alloc = app.alloc;
-            const hub_root = blk: {
-                const home = io_mod.getenv("HOME") orelse break :blk null;
-                break :blk std.fs.path.join(alloc, &.{ home, ".fx", "hub" }) catch null;
-            } orelse {
-                try app.writeDomainNotice(.{ .topic = "hub", .tone = .warning, .body = "hub: HOME is not set." }, true);
-                return;
-            };
-            defer alloc.free(hub_root);
-            const target = std.mem.trim(u8, rest, " \t");
-            var dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), hub_root, .{ .iterate = true }) catch {
-                try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = "Hub is empty. Agents message each other with the hub tool." }, true);
-                return;
-            };
-            defer dir.close(io_mod.getIo());
-
-            var out: std.Io.Writer.Allocating = .init(alloc);
-            defer out.deinit();
-            var iter = dir.iterate();
-            var peers: usize = 0;
-            while (iter.next(io_mod.getIo()) catch null) |entry| {
-                if (entry.kind != .file) continue;
-                if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
-                const peer = entry.name[0 .. entry.name.len - ".jsonl".len];
-                if (target.len > 0 and !std.mem.eql(u8, peer, target)) continue;
-                const path = std.fs.path.join(alloc, &.{ hub_root, entry.name }) catch continue;
-                defer alloc.free(path);
-                var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch continue;
-                defer file.close(io_mod.getIo());
-                const raw = io_mod.readFileToEnd(alloc, &file, 4 << 20) catch continue;
-                defer alloc.free(raw);
-                peers += 1;
-                if (target.len == 0) {
-                    var msgs: usize = 0;
-                    var lines = std.mem.splitScalar(u8, raw, '\n');
-                    while (lines.next()) |line| {
-                        if (line.len > 0) msgs += 1;
-                    }
-                    out.writer.print("{s}: {d} message(s)\n", .{ peer, msgs }) catch {};
-                } else {
-                    out.writer.print("== {s} ==\n{s}", .{ peer, raw }) catch {};
-                }
-            }
-            if (peers == 0) {
-                const body = if (target.len > 0)
-                    try std.fmt.allocPrint(alloc, "hub: no peer named {s}.", .{target})
-                else
-                    try alloc.dupe(u8, "Hub is empty. Agents message each other with the hub tool.");
-                defer alloc.free(body);
-                try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = body }, true);
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "hub_menu")) {
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .warning, .body = "Hub panel is unavailable in this runtime." }, true);
                 return;
             }
-            if (target.len == 0) {
-                out.writer.writeAll("/hub <peer> reads a mailbox; agents drain their own via hub tool op=inbox.") catch {};
+            const arg = std.mem.trim(u8, rest, " \t");
+            if (arg.len > 0) {
+                // scripted form: dump one mailbox as a notice (headless friendly)
+                try app_session_runtime.Runtime(App).dumpHubMailbox(app, arg);
+                return;
             }
-            const body = try alloc.dupe(u8, out.written());
-            defer alloc.free(body);
-            try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = body }, true);
+            try app_session_runtime.Runtime(App).openHubMenu(app);
         }
-
         fn commandShowTodo(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             const alloc = app.alloc;

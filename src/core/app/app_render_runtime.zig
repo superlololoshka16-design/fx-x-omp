@@ -786,6 +786,8 @@ pub fn Runtime(comptime App: type) type {
                     app.slashRegistry(),
                     app.input_runtime.edit_state.input.items,
                 ),
+                .tree_menu = render_input.treeMenuProjection(&app.input_runtime.tree_menu),
+                .hub_menu = render_input.hubMenuProjection(&app.input_runtime.hub_menu),
                 .settings_menu = blk: {
                     var projection = render_input.settingsMenuProjection(
                         &app.input_runtime.settings_menu,
@@ -878,10 +880,11 @@ pub fn Runtime(comptime App: type) type {
                 items.workspace_label = identity.workspace_label;
                 items.git_branch = identity.git_branch;
             }
-            if (app.statusline_context) {
-                items.context_used = app.total_input_tokens;
-                items.context_total = model_capabilities.resolveForApp(App, app, visible_model).context_window;
-            }
+            // Context usage always shown next to the model, regardless of the
+            // statusline_context toggle: the model and its context budget are
+            // one readout. The toggle only affects the optional segments.
+            items.context_used = app.total_input_tokens;
+            items.context_total = model_capabilities.resolveForApp(App, app, visible_model).context_window;
             if (comptime @hasField(App, "statusline_session")) {
                 if (app.statusline_session) {
                     items.session_title = app_session_runtime.Runtime(App).cachedSessionTitle(app);

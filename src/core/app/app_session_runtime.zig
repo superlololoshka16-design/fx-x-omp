@@ -47,6 +47,7 @@ const session_display_metadata = @import("../session/session_display_metadata.zi
 const session_title_generation = @import("../session/session_title_generation.zig");
 const session_log = @import("../session/session_log.zig");
 const session_tree = @import("../session/session_tree.zig");
+const hub_menu_state = @import("../input/hub_menu.zig");
 const session_store = @import("../session/session_store.zig");
 const session_catalog_cache = @import("../session/session_catalog_cache.zig");
 const session_summary_codec = @import("../session/session_summary_codec.zig");
@@ -1929,15 +1930,77 @@ pub fn Runtime(comptime App: type) type {
             return null;
         }
 
+        fn hubRoot(alloc: Allocator) ?[]u8 {
+            const home = io_mod.getenv("HOME") orelse return null;
+            return std.fs.path.join(alloc, &.{ home, ".fx", "hub" }) catch null;
+        }
+
+        /// Live agent-hub panel: scans ~/.fx/hub for peer mailboxes and opens
+        /// the interactive menu (omp /hub parity).
+        pub fn openHubMenu(app: *App) !void {
+            if (comptime !@hasField(App, "input_runtime")) return;
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "hub_menu")) return;
+            const root = hubRoot(app.alloc) orelse {
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .warning, .body = "hub: HOME is not set." }, true);
+                return;
+            };
+            defer app.alloc.free(root);
+            const peers = hub_menu_state.scanPeers(app.alloc, root) catch {
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = "Hub is empty. Agents message each other with the hub tool." }, true);
+                return;
+            };
+            app.input_runtime.hub_menu.close(app.alloc);
+            app.input_runtime.hub_menu = .{
+                .active = true,
+                .peers = peers,
+            };
+            app.shell.render_requests.request(.footer);
+        }
+
+        /// Scripted /hub <peer>: dumps the mailbox as a notice (headless use).
+        pub fn dumpHubMailbox(app: *App, peer: []const u8) !void {
+            const root = hubRoot(app.alloc) orelse {
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .warning, .body = "hub: HOME is not set." }, true);
+                return;
+            };
+            defer app.alloc.free(root);
+            const file_name = try std.fmt.allocPrint(app.alloc, "{s}.jsonl", .{peer});
+            defer app.alloc.free(file_name);
+            const path = try std.fs.path.join(app.alloc, &.{ root, file_name });
+            defer app.alloc.free(path);
+            var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch {
+                const msg = try std.fmt.allocPrint(app.alloc, "hub: no peer named {s}.", .{peer});
+                defer app.alloc.free(msg);
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = msg }, true);
+                return;
+            };
+            defer file.close(io_mod.getIo());
+            const raw = io_mod.readFileToEnd(app.alloc, &file, 4 << 20) catch {
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .warning, .body = "hub: mailbox read failed." }, true);
+                return;
+            };
+            defer app.alloc.free(raw);
+            if (std.mem.trim(u8, raw, " \t\r\n").len == 0) {
+                const msg = try std.fmt.allocPrint(app.alloc, "hub: mailbox {s} is empty.", .{peer});
+                defer app.alloc.free(msg);
+                try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = msg }, true);
+                return;
+            }
+            try app.writeDomainNotice(.{ .topic = "hub", .tone = .neutral, .body = raw }, true);
+        }
+
         fn treeSessionDir(app: *App, alloc: Allocator) ?[]u8 {
             const store = app.session_persistence.store orelse return null;
             const loaded = app.session_persistence.writable orelse return null;
             return session_store.sessionDirPath(alloc, store.sessions_dir, loaded.active_id) catch null;
         }
 
-        /// Lists EVERY turn in the physical log, marking the active branch and
-        /// the rewind leaf, exactly like omp /tree over the full session file.
-        pub fn treeList(app: *App) !void {
+        /// Opens the interactive conversation-tree navigator (omp /tree parity):
+        /// lists EVERY turn in the physical log with the active branch and rewind
+        /// leaf marked; arrow-keys move, Enter rewinds, Esc closes.
+        pub fn openTreeMenu(app: *App) !void {
+            if (comptime !@hasField(App, "input_runtime")) return;
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "tree_menu")) return;
             const store = app.session_persistence.store orelse {
                 try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No session store." }, true);
                 return;
@@ -1960,26 +2023,15 @@ pub fn Runtime(comptime App: type) type {
                 try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No turns recorded yet." }, true);
                 return;
             };
-            defer session_tree.freeTurnNodes(app.alloc, nodes);
             if (nodes.len == 0) {
+                session_tree.freeTurnNodes(app.alloc, nodes);
                 try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = "No turns recorded yet." }, true);
                 return;
             }
-            var out: std.Io.Writer.Allocating = .init(app.alloc);
-            defer out.deinit();
-            for (nodes) |node| {
-                const active = session_tree.turnActive(branch, node.index);
-                const is_leaf = if (branch) |b| (b.leaf != 0 and node.index == b.leaf) else (node.index == nodes.len);
-                const mark: []const u8 = if (is_leaf) " <<" else if (active) "  " else " .";
-                out.writer.print("turn {d: >3}{s} {s}{s}\n", .{ node.index, mark, node.preview, if (active) "" else "  (abandoned)" }) catch {
-                    try app.writeDomainNotice(.{ .topic = "tree", .tone = .warning, .body = "Out of memory rendering tree." }, true);
-                    return;
-                };
-            }
-            out.writer.print("{d} turn(s) in log. /tree <n> rewinds the active branch (back or forward); abandoned turns stay in the log and survive restart.", .{nodes.len}) catch {};
-            const body = try app.alloc.dupe(u8, out.written());
-            defer app.alloc.free(body);
-            try app.writeDomainNotice(.{ .topic = "tree", .tone = .neutral, .body = body }, true);
+            // openWith takes ownership of nodes; the leaf seeds the cursor.
+            const leaf: usize = if (branch) |b| b.leaf else 0;
+            app.input_runtime.tree_menu.openWith(app.alloc, nodes, leaf);
+            app.shell.render_requests.request(.footer);
         }
 
         pub fn rewindToTurn(app: *App, n: usize) !void {

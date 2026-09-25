@@ -386,18 +386,7 @@ fn appendSessionStatusSegments(
 ) void {
     var model_buf: [96]u8 = undefined;
     appendStatusSegment(out, end, compactModelLabel(model, &model_buf));
-    if (model_supports_effort and !effort.isDefault()) {
-        appendStatusSegment(out, end, effort.displayLabel());
-    }
-    if (fast_indicator_active) {
-        appendStatusSegment(out, end, "⚡︎");
-    }
-    if (statusline.loop_label) |label| {
-        appendStatusSegment(out, end, label);
-    }
-    if (statusline.session_title) |title| {
-        appendStatusSegment(out, end, display_width.prefixByWidth(title, max_session_title_cells));
-    }
+    // Context budget reads next to the model, always.
     if (statusline.context_used > 0) {
         if (statusline.context_total) |total| {
             const used_k = statusline.context_used / 1000;
@@ -410,6 +399,18 @@ fn appendSessionStatusSegments(
             var ctx_buf: [32]u8 = undefined;
             appendStatusSegment(out, end, std.fmt.bufPrint(&ctx_buf, "{d}k", .{used_k}) catch "");
         }
+    }
+    if (model_supports_effort and !effort.isDefault()) {
+        appendStatusSegment(out, end, effort.displayLabel());
+    }
+    if (fast_indicator_active) {
+        appendStatusSegment(out, end, "⚡︎");
+    }
+    if (statusline.loop_label) |label| {
+        appendStatusSegment(out, end, label);
+    }
+    if (statusline.session_title) |title| {
+        appendStatusSegment(out, end, display_width.prefixByWidth(title, max_session_title_cells));
     }
     appendWorkspaceIdentity(out, end, status_limit, statusline);
 }

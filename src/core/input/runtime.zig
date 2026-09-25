@@ -27,6 +27,8 @@ const picker_state = @import("picker_state.zig");
 const registered_entities = @import("registered_entities.zig");
 const text_scalar = @import("text_scalar.zig");
 const vertical_navigation = @import("vertical_navigation.zig");
+const tree_menu_state = @import("tree_menu.zig");
+const hub_menu_state = @import("hub_menu.zig");
 
 const Allocator = std.mem.Allocator;
 const ImageBlocks = kill_ring.ImageBlocks;
@@ -36,6 +38,8 @@ pub const Runtime = struct {
     slash_menu_categories: bool = true,
     picker: picker_state.State = .{},
     help_menu: command_specs.HelpMenu = .{},
+    tree_menu: tree_menu_state.TreeMenu = .{},
+    hub_menu: hub_menu_state.HubMenu = .{},
     settings_menu: settings_catalog.Menu = .{},
     statusline_menu: settings_catalog.StatuslineMenu = .{},
     usage_menu: usage_menu.State = .{},
@@ -57,6 +61,8 @@ pub const Runtime = struct {
         input_reset.resetPendingTextScalarWithTrace(&self.text_scalar, "shutdown");
         self.paste.deinit(alloc);
         self.usage_menu.close(alloc);
+        self.tree_menu.deinit(alloc);
+        self.hub_menu.deinit(alloc);
         self.edit_state.deinit(alloc);
         self.picker.deinit(alloc);
         self.composer_history.deinit(alloc);

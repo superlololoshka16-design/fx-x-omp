@@ -18,6 +18,8 @@ const picker_presentation = @import("picker_presentation.zig");
 const model_menu_presentation = @import("model_menu_presentation.zig");
 const skills_menu_presentation = @import("skills_menu_presentation.zig");
 const help_menu_presentation = @import("help_menu_presentation.zig");
+const tree_menu_presentation = @import("tree_menu_presentation.zig");
+const hub_menu_presentation = @import("hub_menu_presentation.zig");
 const settings_menu_presentation = @import("settings_menu_presentation.zig");
 const mcp_menu_presentation = @import("mcp_menu_presentation.zig");
 const resume_menu_presentation = @import("resume_menu_presentation.zig");
@@ -398,10 +400,12 @@ fn buildFooterSurfaceProjection(
     const show_auth_picker = !viewer_active and !modal_active and !ctx.stream.active and ctx.auth_picker.active and !inline_api_key;
     const show_settings_menu = !viewer_active and !show_auth_picker and !modal_active and ctx.settings_menu.active;
     const show_mcp_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !modal_active and ctx.mcp_menu.state.active;
-    const show_help_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !modal_active and ctx.help_menu.active;
-    const show_session_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_help_menu and !modal_active and ctx.session_menu.active;
-    const show_models_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_help_menu and !show_session_menu and !modal_active and ctx.model_menu.active;
-    const show_inline_catalog = show_settings_menu or show_mcp_menu or show_help_menu or show_session_menu or show_models_menu;
+    const show_tree_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !modal_active and ctx.tree_menu.active;
+    const show_hub_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_tree_menu and !modal_active and ctx.hub_menu.active;
+    const show_help_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_tree_menu and !show_hub_menu and !modal_active and ctx.help_menu.active;
+    const show_session_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_tree_menu and !show_hub_menu and !show_help_menu and !modal_active and ctx.session_menu.active;
+    const show_models_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_mcp_menu and !show_tree_menu and !show_hub_menu and !show_help_menu and !show_session_menu and !modal_active and ctx.model_menu.active;
+    const show_inline_catalog = show_settings_menu or show_mcp_menu or show_tree_menu or show_hub_menu or show_help_menu or show_session_menu or show_models_menu;
     const show_skills_query = !viewer_active and !show_auth_picker and !show_inline_catalog and !modal_active and ctx.skills_menu.active;
     const show_model_query = !viewer_active and !show_auth_picker and !show_inline_catalog and !show_skills_query and !modal_active and
         ctx.model_query_active;
@@ -494,6 +498,10 @@ fn buildFooterSurfaceProjection(
         .settings
     else if (show_mcp_menu)
         .mcp
+    else if (show_tree_menu)
+        .tree
+    else if (show_hub_menu)
+        .hub
     else if (show_help_menu)
         .help
     else if (show_session_menu)
@@ -571,6 +579,18 @@ fn buildFooterSurfaceProjection(
         banner_rows,
         mcp_menu_presentation.max_inline_rows,
     );
+    const tree_picker_row_budget = picker_presentation.inlinePickerRowBudgetCapped(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+        tree_menu_presentation.max_inline_rows,
+    );
+    const hub_picker_row_budget = picker_presentation.inlinePickerRowBudgetCapped(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+        hub_menu_presentation.max_inline_rows,
+    );
     const picker_rows: u16 = if (sizing_request) |request|
         if (request.file) |request_file|
             approval_ui.fileApprovalPickerRows(request_file)
@@ -609,6 +629,18 @@ fn buildFooterSurfaceProjection(
             ctx.mcp_menu,
             shell.layout.cols,
             mcp_picker_row_budget,
+        )
+    else if (show_tree_menu)
+        tree_menu_presentation.menuRowCount(
+            ctx.tree_menu,
+            shell.layout.cols,
+            tree_picker_row_budget,
+        )
+    else if (show_hub_menu)
+        hub_menu_presentation.menuRowCount(
+            ctx.hub_menu,
+            shell.layout.cols,
+            hub_picker_row_budget,
         )
     else if (show_help_menu)
         help_menu_presentation.menuRowCount(

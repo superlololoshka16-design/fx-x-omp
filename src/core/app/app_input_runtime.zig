@@ -1500,6 +1500,8 @@ pub fn Runtime(comptime App: type) type {
                     return;
                 },
                 '\r' => {
+                    if (try submitTreeMenuSelection(app)) return;
+                    if (try submitHubMenuSelection(app)) return;
                     if (try submitSettingsMenuSelection(app)) return;
                     if (try submitHelpMenuSelection(app, max_input_len, max_prompt_history)) return;
                     if (try submitAuthPickerSelection(app)) return;
@@ -2329,7 +2331,10 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn dismissActiveMenusThenRedraw(app: *App) void {
-            if (dismissActiveMenusForComposerEdit(app)) {
+            var dismissed = dismissActiveMenusForComposerEdit(app);
+            dismissed = cancelTreeMenu(app) or dismissed;
+            dismissed = cancelHubMenu(app) or dismissed;
+            if (dismissed) {
                 app.shell.render_requests.request(.footer);
             }
         }
@@ -3056,7 +3061,7 @@ pub fn Runtime(comptime App: type) type {
                     _ = disarmEscapeInterrupt(app, "approval_prompt");
                     return;
                 }
-                if (cancelCompactCommandMenu(app) or (try cancelMcpMenu(app)) or cancelSettingsMenu(app) or cancelHelpMenu(app) or cancelModelMenu(app) or cancelSkillsMenu(app) or cancelSessionMenu(app)) {
+                if (cancelTreeMenu(app) or cancelHubMenu(app) or cancelCompactCommandMenu(app) or (try cancelMcpMenu(app)) or cancelSettingsMenu(app) or cancelHelpMenu(app) or cancelModelMenu(app) or cancelSkillsMenu(app) or cancelSessionMenu(app)) {
                     _ = disarmEscapeClear(app);
                     _ = disarmEscapeInterrupt(app, "menu");
                     app.shell.render_requests.request(.footer);
@@ -3103,7 +3108,7 @@ pub fn Runtime(comptime App: type) type {
                 _ = disarmEscapeClear(app);
                 return;
             }
-            if (cancelCompactCommandMenu(app) or (try cancelMcpMenu(app)) or cancelSettingsMenu(app) or cancelHelpMenu(app) or cancelModelMenu(app) or cancelSkillsMenu(app) or cancelSessionMenu(app)) {
+            if (cancelTreeMenu(app) or cancelHubMenu(app) or cancelCompactCommandMenu(app) or (try cancelMcpMenu(app)) or cancelSettingsMenu(app) or cancelHelpMenu(app) or cancelModelMenu(app) or cancelSkillsMenu(app) or cancelSessionMenu(app)) {
                 _ = disarmEscapeClear(app);
                 app.shell.render_requests.request(.footer);
                 return;
@@ -3172,6 +3177,51 @@ pub fn Runtime(comptime App: type) type {
 
         fn cancelHelpMenu(app: *App) bool {
             return closeHelpMenu(app, true);
+        }
+
+        fn cancelTreeMenu(app: *App) bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "tree_menu")) return false;
+            if (!app.input_runtime.tree_menu.active) return false;
+            app.input_runtime.tree_menu.close(app.alloc);
+            return true;
+        }
+
+        fn cancelHubMenu(app: *App) bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "hub_menu")) return false;
+            if (!app.input_runtime.hub_menu.active) return false;
+            // mailbox view: Esc steps back to the peer list first
+            if (app.input_runtime.hub_menu.backToList(app.alloc)) return true;
+            app.input_runtime.hub_menu.close(app.alloc);
+            return true;
+        }
+
+        fn submitTreeMenuSelection(app: *App) !bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "tree_menu")) return false;
+            if (!app.input_runtime.tree_menu.active) return false;
+            const turn = app.input_runtime.tree_menu.selectedTurn();
+            app.input_runtime.tree_menu.close(app.alloc);
+            app.shell.render_requests.request(.footer);
+            if (turn) |n| {
+                try app_session_runtime.Runtime(App).rewindToTurn(app, n);
+            }
+            return true;
+        }
+
+        fn submitHubMenuSelection(app: *App) !bool {
+            if (comptime !@hasField(@TypeOf(app.input_runtime), "hub_menu")) return false;
+            if (!app.input_runtime.hub_menu.active) return false;
+            const menu = &app.input_runtime.hub_menu;
+            if (menu.open_peer != null) return true; // mailbox view: Enter is inert
+            const root = hubRootForMenu(app) orelse return true;
+            defer app.alloc.free(root);
+            try menu.openSelected(app.alloc, root);
+            app.shell.render_requests.request(.footer);
+            return true;
+        }
+
+        fn hubRootForMenu(app: *App) ?[]u8 {
+            const home = io_mod.getenv("HOME") orelse return null;
+            return std.fs.path.join(app.alloc, &.{ home, ".fx", "hub" }) catch null;
         }
 
         fn cancelMcpMenu(app: *App) !bool {

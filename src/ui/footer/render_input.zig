@@ -243,6 +243,96 @@ pub const SessionMenuProjection = struct {
     }
 };
 
+pub const TreeMenuProjection = struct {
+    active: bool = false,
+    nodes: []const @import("../../core/session/session_tree.zig").TurnNode = &.{},
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    /// Active-branch leaf (1-based); 0 = whole log active.
+    leaf: usize = 0,
+
+    pub fn filteredItemCount(self: TreeMenuProjection) usize {
+        return self.nodes.len;
+    }
+
+    pub fn itemAt(self: TreeMenuProjection, display_index: usize) ?*const @import("../../core/session/session_tree.zig").TurnNode {
+        if (display_index >= self.nodes.len) return null;
+        return &self.nodes[display_index];
+    }
+
+    pub fn turnActive(self: TreeMenuProjection, index: usize) bool {
+        if (self.leaf == 0) return true;
+        return index <= self.leaf;
+    }
+};
+
+pub const HubMenuProjection = struct {
+    active: bool = false,
+    peers: []const HubPeer = &.{},
+    selected_index: usize = 0,
+    window_start: usize = 0,
+    /// Mailbox view: when set, rows are the peer's message lines.
+    open_peer: ?[]const u8 = null,
+    open_body: []const u8 = "",
+
+    pub fn filteredItemCount(self: HubMenuProjection) usize {
+        return self.peers.len;
+    }
+
+    pub fn itemAt(self: HubMenuProjection, display_index: usize) ?*const HubPeer {
+        if (display_index >= self.peers.len) return null;
+        return &self.peers[display_index];
+    }
+
+    pub fn mailboxLineCount(self: HubMenuProjection) usize {
+        if (self.open_peer == null) return 0;
+        var count: usize = 0;
+        var lines = std.mem.splitScalar(u8, self.open_body, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.trim(u8, line, " \t\r").len > 0) count += 1;
+        }
+        return count;
+    }
+
+    pub fn mailboxLineAt(self: HubMenuProjection, index: usize) ?[]const u8 {
+        if (self.open_peer == null) return null;
+        var seen: usize = 0;
+        var lines = std.mem.splitScalar(u8, self.open_body, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
+            if (seen == index) return line;
+            seen += 1;
+        }
+        return null;
+    }
+};
+
+pub fn treeMenuProjection(menu: *const @import("../../core/input/tree_menu.zig").TreeMenu) TreeMenuProjection {
+    return .{
+        .active = menu.active,
+        .nodes = menu.nodes,
+        .selected_index = menu.selected_index,
+        .window_start = menu.window_start,
+        .leaf = menu.leaf,
+    };
+}
+
+pub fn hubMenuProjection(menu: *const @import("../../core/input/hub_menu.zig").HubMenu) HubMenuProjection {
+    return .{
+        .active = menu.active,
+        .peers = menu.peers,
+        .selected_index = menu.selected_index,
+        .window_start = menu.window_start,
+        .open_peer = menu.open_peer,
+        .open_body = menu.open_body,
+    };
+}
+
+pub const HubPeer = struct {
+    name: []const u8,
+    messages: usize,
+};
+
 pub const HelpMenuProjection = struct {
     active: bool = false,
     category: ?command_specs.SlashPresentationCategory = null,
@@ -467,6 +557,8 @@ pub const RenderContext = struct {
     settings_menu: SettingsMenuProjection = .{},
     model_menu: ModelMenuProjection = .{},
     session_menu: SessionMenuProjection = .{},
+    tree_menu: TreeMenuProjection = .{},
+    hub_menu: HubMenuProjection = .{},
     statusline_menu: StatuslineMenuProjection = .{},
     usage_menu: UsageMenuProjection = .{},
     workspace_menu: WorkspaceMenuProjection = .{},
