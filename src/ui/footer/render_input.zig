@@ -779,10 +779,13 @@ pub fn activityOverlayInput(
 
 pub fn activityProjectionRows(projection: ActivityProjection, cols: u16) u16 {
     return switch (projection) {
-        .turn_thinking => |thinking| if (thinking.tone == .thinking)
-            1
-        else
-            wrappedStatusRowCount(thinking.label, cols, max_static_status_activity_rows),
+        // Thinking labels carry the live reasoning preview, so they wrap like
+        // static statuses instead of clamping to a single row.
+        .turn_thinking => |thinking| wrappedStatusRowCount(
+            thinking.label,
+            cols,
+            max_static_status_activity_rows,
+        ),
         .none, .tool_slot => 1,
     };
 }
@@ -1373,7 +1376,9 @@ test "static turn status reserves wrapped activity rows" {
         .tone = .thinking,
     } };
 
-    try std.testing.expectEqual(@as(u16, 1), activityProjectionRows(normal_thinking, 42));
+    // Thinking labels now carry the live reasoning preview and reserve the
+    // same wrapped rows as static statuses.
+    try std.testing.expect(activityProjectionRows(normal_thinking, 42) > 1);
     try std.testing.expect(activityProjectionRows(projection, 42) > 1);
     try std.testing.expectEqual(@as(u16, 1), activityProjectionRows(projection, 160));
 }

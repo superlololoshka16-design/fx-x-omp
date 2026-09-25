@@ -199,11 +199,14 @@ fn paintPlannedActivityRow(
         .neutral, .warning, .success, .danger => true,
         .thinking, .tool_marker => false,
     };
+    // Thinking labels stream the live reasoning preview; when the placement
+    // reserved more than one row they wrap vertically instead of clamping.
+    const wraps_rows = static_status or (input.style == .thinking and max_rows > 1);
     const preserve_trailing_context = switch (input.style) {
         .warning, .danger => true,
         .thinking, .tool_marker, .neutral, .success => false,
     };
-    const preview = if (static_status)
+    const preview = if (wraps_rows)
         try wrappedStaticActivityLabel(
             surface.alloc,
             input.label,
@@ -227,7 +230,7 @@ fn paintPlannedActivityRow(
         .success => writeStaticStyledText(&buf, preview.bytes, ui_render.green_style),
         .danger => writeStaticStyledText(&buf, preview.bytes, ui_render.red_style),
     };
-    const result = if (static_status and max_rows > 1)
+    const result = if (wraps_rows and max_rows > 1)
         try surface.writeAnsiBandNoWrap(
             row,
             max_rows,
@@ -513,6 +516,45 @@ test "activity surface painter clamps long transient label to one row" {
     try std.testing.expectEqual(@as(u21, '.'), fixtures.surface.cellAt(4, 8).?.codepoint);
     try std.testing.expectEqual(@as(u21, ' '), fixtures.surface.cellAt(5, 1).?.codepoint);
     try std.testing.expectEqual(paint_plan.CellOwner.footer, fixtures.surface.cellAt(5, 1).?.owner);
+}
+
+test "activity surface painter wraps long thinking label across reserved rows" {
+    var plan = testPlan(
+        .{ .transient_row = .{ .row = 3, .row_count = 2, .gap_above_rows = 0 } },
+        .{ .top = 3, .bottom = 4, .owner = .activity },
+    );
+    plan.layout.rows = 7;
+    plan.layout.cols = 16;
+    plan.footer_band = .{ .top = 5, .bottom = 6, .owner = .footer };
+    plan.footer.top = 5;
+    plan.footer.top_divider = 5;
+    plan.footer.banner = 5;
+    plan.footer.input_base = 5;
+    plan.footer.picker_divider = 5;
+    plan.footer.picker_start = 6;
+    plan.footer.bottom_divider = 5;
+    plan.footer.hint = 6;
+
+    var fixtures = try testSurface(plan);
+    defer fixtures.surface.deinit();
+    defer fixtures.shadow.deinit();
+
+    const result = try paintActivityIntoSurface(&fixtures.surface, .{
+        .label = "• Thinking · aaaaaaaa bbbbbbbb cccccccc",
+        .shimmer_pos = -8,
+        .style = .thinking,
+    });
+
+    try std.testing.expect(result.painted);
+    try std.testing.expectEqual(@as(u16, 3), result.row);
+    // First row starts at the marker; the continuation indents under it and
+    // the overflow tail truncates with "..." instead of clamping to one row.
+    try std.testing.expectEqual(@as(u21, '•'), fixtures.surface.cellAt(3, 1).?.codepoint);
+    try std.testing.expectEqual(@as(u21, 'a'), fixtures.surface.cellAt(4, 3).?.codepoint);
+    try std.testing.expectEqual(@as(u21, '.'), fixtures.surface.cellAt(4, 13).?.codepoint);
+    try std.testing.expectEqual(paint_plan.CellOwner.activity, fixtures.surface.cellAt(4, 1).?.owner);
+    try std.testing.expectEqual(paint_plan.CellOwner.footer, fixtures.surface.cellAt(5, 1).?.owner);
+    try fixtures.surface.validate();
 }
 
 test "activity surface painter wraps static status labels under marker" {
